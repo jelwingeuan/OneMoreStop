@@ -1,0 +1,394 @@
+import MapKit
+import SwiftData
+import SwiftUI
+
+struct PlaceSearchView: View {
+    let target: SearchTarget
+    let search: MapSearchService
+    let near: Coordinate?
+    let onSelect: (Place) -> Void
+    let onCurrentLocation: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @Query(sort: \RecentPlace.usedAt, order: .reverse) private var recents: [RecentPlace]
+    @State private var query = ""
+    @State private var suggestions: [MKLocalSearchCompletion] = []
+    @State private var loading = false
+    @State private var errorMessage: String?
+    @State private var explainLocation = false
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if target == .origin {
+                    Button { explainLocation = true } label: {
+                        Label("Current Location", systemImage: "location.fill")
+                    }
+                }
+                if !query.isEmpty {
+                    ForEach(suggestions, id: \.self) { completion in
+                        Button {
+                            loading = true
+                            Task {
+                                do {
+                                    let place = try await search.resolve(completion)
+                                    onSelect(place)
+                                    dismiss()
+                                } catch { errorMessage = "Couldn’t find that place. Try another result." }
+                                loading = false
+                            }
+                        } label: {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(completion.title).foregroundStyle(.primary)
+                                Text(completion.subtitle).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                } else {
+                    Section(target == .origin ? "Recent starts" : target == .replacement ? "Recent stops" : "Recent destinations") {
+                        ForEach(Array(recents.filter { $0.kind == (target == .replacement ? "stop" : target.rawValue) }.prefix(8))) { recent in
+                            Button {
+                                onSelect(recent.place)
+                                dismiss()
+                            } label: {
+                                Label(recent.name, systemImage: "clock.arrow.circlepath")
+                                    .foregroundStyle(.primary)
+                            }
+                        }
+                    }
+                }
+                if let errorMessage { Text(errorMessage).foregroundStyle(.red) }
+            }
+            .navigationTitle(target == .origin ? "Starting place" : target == .replacement ? "Replacement stop" : "Destination")
+            .navigationBarTitleDisplayMode(.inline)
+            .searchable(text: $query, prompt: "Search places")
+            .onChange(of: query) { _, value in
+                errorMessage = nil
+                search.suggestions(for: value, near: near) { suggestions = $0 }
+            }
+            .onDisappear { search.cancelSuggestions() }
+            .overlay {
+                if loading { ProgressView().padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16)) }
+            }
+            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+            .alert("Use your location?", isPresented: $explainLocation) {
+                Button("Continue") { onCurrentLocation(); dismiss() }
+                Button("Choose manually", role: .cancel) {}
+            } message: {
+                Text("OneMoreStop uses your current position to plan this drive and find stops ahead. You can choose a starting place instead.")
+            }
+        }
+    }
+}
+
+struct PlaceDetailView: View {
+    let recommendation: StopRecommendation
+    let isSelected: Bool
+    let canAdd: Bool
+    let onAdd: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
+    @Query private var saved: [SavedPlace]
+    @Query(sort: \SavedCollection.createdAt) private var collections: [SavedCollection]
+    @State private var lookAroundScene: MKLookAroundScene?
+    @AppStorage("distanceUnit") private var distanceUnit = "automatic"
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    if let lookAroundScene {
+                        LookAroundPreview(initialScene: lookAroundScene)
+                            .frame(height: 215)
+                            .clipShape(RoundedRectangle(cornerRadius: 20))
+                            .accessibilityLabel("Look Around preview of \(recommendation.place.name)")
+                    }
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(recommendation.place.name).font(.largeTitle.bold())
+                        Text(recommendation.place.category?.title ?? "Place")
+                            .font(.subheadline).foregroundStyle(.secondary)
+                        if let address = recommendation.place.address, !address.isEmpty {
+                            Text(address).font(.subheadline).foregroundStyle(.secondary)
+                        }
+                    }
+                    HStack(spacing: 26) {
+                        metric("Extra driving", TripFormatting.extraTime(recommendation.detourTime))
+                        metric("Extra distance", TripFormatting.distance(recommendation.detourDistance, preference: distanceUnit))
+                    }
+                    if let phone = recommendation.place.phone { LabeledContent("Phone", value: phone) }
+                    if let website = recommendation.place.website { Link("Website", destination: website) }
+                    HStack {
+                        Button {
+                            if let existing = saved.first(where: { $0.id == recommendation.place.id }) {
+                                modelContext.delete(existing)
+                                for collection in collections {
+                                    collection.placeIDs.removeAll { $0 == recommendation.place.id }
+                                }
+                            } else { modelContext.insert(SavedPlace(recommendation.place)) }
+                        } label: {
+                            Label(isSaved ? "Saved" : "Save", systemImage: isSaved ? "bookmark.fill" : "bookmark")
+                        }
+                        .buttonStyle(.bordered)
+                        ShareLink(item: shareURL) {
+                            Label("Share", systemImage: "square.and.arrow.up")
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    if isSaved && !collections.isEmpty {
+                        Menu("Add to collection") {
+                            ForEach(collections) { collection in
+                                Button(collection.name) {
+                                    if !collection.placeIDs.contains(recommendation.place.id) {
+                                        collection.placeIDs.append(recommendation.place.id)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Button(isSelected ? "Added to journey" : "Add stop", action: onAdd)
+                        .buttonStyle(.borderedProminent)
+                        .tint(.orange)
+                        .frame(maxWidth: .infinity)
+                        .disabled(isSelected || !canAdd)
+                    if !canAdd && !isSelected { Text("Three stops is the limit for this journey.").font(.caption) }
+                }
+                .padding(20)
+            }
+            .navigationTitle("Place details")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+            .task(id: recommendation.id) {
+                lookAroundScene = try? await MKLookAroundSceneRequest(coordinate: recommendation.place.coordinate.clLocation).scene
+            }
+        }
+    }
+
+    private var isSaved: Bool { saved.contains { $0.id == recommendation.place.id } }
+    private var shareURL: URL {
+        var parts = URLComponents(string: "https://maps.apple.com/")!
+        let point = recommendation.place.coordinate
+        parts.queryItems = [
+            URLQueryItem(name: "ll", value: "\(point.latitude),\(point.longitude)"),
+            URLQueryItem(name: "q", value: recommendation.place.name)
+        ]
+        return parts.url!
+    }
+    private func metric(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label).font(.caption).foregroundStyle(.secondary)
+            Text(value).font(.title2.bold())
+        }
+    }
+}
+
+struct SavedView: View {
+    let onChoose: (Place) -> Void
+    let onRepeat: (RecentJourney) -> Void
+    @Environment(\.modelContext) private var modelContext
+    @Query(sort: \SavedPlace.savedAt, order: .reverse) private var saved: [SavedPlace]
+    @Query(sort: \SavedCollection.createdAt, order: .reverse) private var collections: [SavedCollection]
+    @Query(sort: \RecentPlace.usedAt, order: .reverse) private var recent: [RecentPlace]
+    @Query(sort: \RecentJourney.createdAt, order: .reverse) private var journeys: [RecentJourney]
+    @State private var showNewCollection = false
+    @State private var collectionName = ""
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Collections") {
+                    if collections.isEmpty {
+                        Text("Organize saved places into collections.").foregroundStyle(.secondary)
+                    }
+                    ForEach(collections) { collection in
+                        NavigationLink {
+                            CollectionView(collection: collection, saved: saved, onChoose: onChoose)
+                        } label: {
+                            Label("\(collection.name) · \(collection.placeIDs.count)", systemImage: "square.stack")
+                        }
+                    }
+                    .onDelete { offsets in for index in offsets { modelContext.delete(collections[index]) } }
+                    Button("New collection", systemImage: "plus") { showNewCollection = true }
+                }
+                Section("Saved places") {
+                    if saved.isEmpty { Text("Places you save will appear here.").foregroundStyle(.secondary) }
+                    ForEach(saved) { place in
+                        Button { onChoose(place.place) } label: { placeRow(place.name, address: place.address) }
+                    }
+                    .onDelete { offsets in
+                        for index in offsets {
+                            let id = saved[index].id
+                            modelContext.delete(saved[index])
+                            for collection in collections { collection.placeIDs.removeAll { $0 == id } }
+                        }
+                    }
+                }
+                Section("Journeys") {
+                    if journeys.isEmpty {
+                        Text("Finish a journey to keep a local summary.").foregroundStyle(.secondary)
+                    }
+                    ForEach(journeys.prefix(10)) { journey in
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack {
+                                Text(journey.destinationName).font(.headline)
+                                if journey.saved { Image(systemName: "bookmark.fill").foregroundStyle(.orange) }
+                            }
+                            Text("\(journey.places.count - 2) stops · \(TripFormatting.extraTime(journey.extraDuration)) driving")
+                                .font(.caption).foregroundStyle(.secondary)
+                            Button("Repeat journey") { onRepeat(journey) }.font(.caption.weight(.semibold))
+                        }
+                    }
+                    .onDelete { offsets in for index in offsets { modelContext.delete(journeys[index]) } }
+                }
+                Section("Recent stops") {
+                    ForEach(Array(recent.filter { $0.kind == "stop" }.prefix(8))) { place in
+                        Button { onChoose(place.place) } label: { placeRow(place.name, address: place.address) }
+                    }
+                }
+            }
+            .navigationTitle("Saved")
+            .alert("New collection", isPresented: $showNewCollection) {
+                TextField("Collection name", text: $collectionName)
+                Button("Create") {
+                    let name = collectionName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !name.isEmpty { modelContext.insert(SavedCollection(name: name)) }
+                    collectionName = ""
+                }
+                Button("Cancel", role: .cancel) { collectionName = "" }
+            }
+        }
+    }
+
+    private func placeRow(_ name: String, address: String?) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(name).foregroundStyle(.primary)
+            if let address { Text(address).font(.caption).foregroundStyle(.secondary) }
+        }
+    }
+}
+
+private struct CollectionView: View {
+    let collection: SavedCollection
+    let saved: [SavedPlace]
+    let onChoose: (Place) -> Void
+
+    var body: some View {
+        List {
+            ForEach(saved.filter { collection.placeIDs.contains($0.id) }) { place in
+                Button(place.name) { onChoose(place.place) }
+            }
+            .onDelete { offsets in
+                let members = saved.filter { collection.placeIDs.contains($0.id) }
+                for index in offsets { collection.placeIDs.removeAll { $0 == members[index].id } }
+            }
+        }
+        .navigationTitle(collection.name)
+        .overlay {
+            if collection.placeIDs.isEmpty {
+                ContentUnavailableView("No places yet", systemImage: "bookmark",
+                                       description: Text("Save a place and add it from its details."))
+            }
+        }
+    }
+}
+
+struct SettingsView: View {
+    @Environment(\.dismiss) private var dismiss
+    @AppStorage("distanceUnit") private var distanceUnit = "automatic"
+    @AppStorage("defaultBudget") private var defaultBudget = 20
+    @AppStorage("localFirst") private var localFirst = false
+    @AppStorage("evJourney") private var evJourney = false
+    @AppStorage("appearance") private var appearance = "system"
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Driving") {
+                    Picker("Distance units", selection: $distanceUnit) {
+                        Text("Automatic").tag("automatic")
+                        Text("Kilometers").tag("kilometers")
+                        Text("Miles").tag("miles")
+                    }
+                    Picker("Default extra time", selection: $defaultBudget) {
+                        ForEach(DiscoveryTuning.budgets, id: \.self) { Text("\($0) minutes").tag($0) }
+                        Text("90 minutes").tag(90)
+                    }
+                    LabeledContent("Travel mode", value: "Driving")
+                }
+                Section("Discover") {
+                    Toggle("Show local places first", isOn: $localFirst)
+                    Toggle("EV Journey", isOn: $evJourney)
+                    Text("EV Journey includes charging places in Useful. Charger availability and specifications are not verified.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Section("Appearance") {
+                    Picker("Theme", selection: $appearance) {
+                        Text("System").tag("system")
+                        Text("Light").tag("light")
+                        Text("Dark").tag("dark")
+                    }
+                }
+                Section("Privacy") {
+                    Text("Saved places and journey summaries stay on this device. Current Location is resolved when you use it; precise location trails are not stored. Apple Maps provides search and driving routes.")
+                        .font(.subheadline)
+                }
+            }
+            .navigationTitle("Settings")
+            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+        }
+    }
+}
+
+struct IntroductionView: View {
+    let onContinue: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Image(systemName: "point.topleft.down.curvedto.point.bottomright.up")
+                .font(.system(size: 44, weight: .bold)).foregroundStyle(.orange)
+            Text("A little time. A better drive.").font(.largeTitle.bold())
+            Text("Tell us where you're going and how many extra driving minutes you can spare. We'll check real routes for stops along the way.")
+                .font(.body).foregroundStyle(.secondary)
+            Text("Choose Current Location when you need it, or set a starting place yourself.")
+                .font(.subheadline).foregroundStyle(.secondary)
+            Button("Start exploring", action: onContinue)
+                .buttonStyle(.borderedProminent).tint(.orange)
+                .frame(maxWidth: .infinity)
+        }
+        .padding(28)
+    }
+}
+
+struct JourneySummaryView: View {
+    let route: RoutePlan
+    let journey: Journey
+    let budget: Int
+    let onDone: (Bool) -> Void
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 18) {
+                Image(systemName: "flag.checkered").font(.largeTitle).foregroundStyle(.orange)
+                Text("Your drive").font(.largeTitle.bold())
+                Text("\(route.origin.name) to \(route.destination.name)")
+                    .font(.headline)
+                Text("\(journey.stops.count) stops · \(TripFormatting.duration(journey.drivingDuration)) driving · \(TripFormatting.extraTime(journey.extraDuration)) versus direct · \(budget) minute budget")
+                    .foregroundStyle(.secondary)
+                ForEach(Array(journey.stops.enumerated()), id: \.element.id) { index, place in
+                    Label("\(index + 1). \(place.name)", systemImage: place.category?.symbol ?? "mappin")
+                }
+                Spacer()
+                Button("Save summary") { onDone(true) }
+                    .buttonStyle(.borderedProminent).tint(.orange)
+                Button("Done without saving") { onDone(false) }
+            }
+            .padding(24)
+            .navigationTitle("Journey summary")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+    }
+}
+
+enum SearchTarget: String, Identifiable {
+    case origin, destination, replacement
+    var id: String { rawValue }
+}

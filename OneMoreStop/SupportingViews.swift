@@ -83,6 +83,7 @@ struct PlaceSearchView: View {
 
 struct PlaceDetailView: View {
     let recommendation: StopRecommendation
+    let distanceUnit: String
     let isSelected: Bool
     let canAdd: Bool
     let onAdd: () -> Void
@@ -92,7 +93,6 @@ struct PlaceDetailView: View {
     @Query private var saved: [SavedPlace]
     @Query(sort: \SavedCollection.createdAt) private var collections: [SavedCollection]
     @State private var lookAroundScene: MKLookAroundScene?
-    @AppStorage("distanceUnit") private var distanceUnit = "automatic"
 
     var body: some View {
         NavigationStack {
@@ -159,7 +159,15 @@ struct PlaceDetailView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
             .task(id: recommendation.id) {
-                lookAroundScene = try? await MKLookAroundSceneRequest(coordinate: recommendation.place.coordinate.clLocation).scene
+                do {
+                    try await MapRequestGate.shared.acquire()
+                    do {
+                        lookAroundScene = try await MKLookAroundSceneRequest(coordinate: recommendation.place.coordinate.clLocation).scene
+                        await MapRequestGate.shared.release()
+                    } catch {
+                        await MapRequestGate.shared.release()
+                    }
+                } catch { }
             }
         }
     }
@@ -236,9 +244,26 @@ struct SavedView: View {
                             Text("\(journey.places.count - 2) stops · \(TripFormatting.extraTime(journey.extraDuration)) driving")
                                 .font(.caption).foregroundStyle(.secondary)
                             Button("Repeat journey") { onRepeat(journey) }.font(.caption.weight(.semibold))
+                            ShareLink(item: JourneyShare.summary(origin: journey.places.first?.name ?? "Start",
+                                                                   destination: journey.destinationName,
+                                                                   stops: Array(journey.places.dropFirst(2)))) {
+                                Label("Share planned route", systemImage: "square.and.arrow.up")
+                                    .font(.caption.weight(.semibold))
+                            }
                         }
                     }
                     .onDelete { offsets in for index in offsets { modelContext.delete(journeys[index]) } }
+                }
+                Section("Planning challenges") {
+                    let challenges = PlanningChallenges.earned(from: journeys)
+                    if challenges.isEmpty {
+                        Text("Plan journeys with stops to collect milestones.").foregroundStyle(.secondary)
+                    }
+                    ForEach(challenges, id: \.self) { name in
+                        Label(name, systemImage: "rosette").foregroundStyle(.orange)
+                    }
+                    Text("These reflect saved plans, not places you drove past.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("Recent stops") {
                     ForEach(Array(recent.filter { $0.kind == "stop" }.prefix(8))) { place in
@@ -293,36 +318,59 @@ private struct CollectionView: View {
 }
 
 struct SettingsView: View {
+    let onResetNotInterested: () -> Void
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("distanceUnit") private var distanceUnit = "automatic"
-    @AppStorage("defaultBudget") private var defaultBudget = 20
-    @AppStorage("localFirst") private var localFirst = false
-    @AppStorage("evJourney") private var evJourney = false
-    @AppStorage("appearance") private var appearance = "system"
+    @Query private var preferences: [UserPreferenceRecord]
 
     var body: some View {
         NavigationStack {
-            Form {
+            if let preference = preferences.first {
+                SettingsForm(preference: preference, onDone: { dismiss() },
+                             onResetNotInterested: onResetNotInterested)
+            } else {
+                ContentUnavailableView("Settings unavailable", systemImage: "gearshape")
+            }
+        }
+    }
+}
+
+private struct SettingsForm: View {
+    @Bindable var preference: UserPreferenceRecord
+    let onDone: () -> Void
+    let onResetNotInterested: () -> Void
+    @Environment(\.modelContext) private var modelContext
+    @Query private var ignoredPlaces: [IgnoredPlaceRecord]
+    #if DEBUG
+    @State private var requestMetrics: MapRequestGate.Metrics?
+    #endif
+
+    var body: some View {
+        Form {
                 Section("Driving") {
-                    Picker("Distance units", selection: $distanceUnit) {
+                    Picker("Distance units", selection: $preference.distanceUnit) {
                         Text("Automatic").tag("automatic")
                         Text("Kilometers").tag("kilometers")
                         Text("Miles").tag("miles")
                     }
-                    Picker("Default extra time", selection: $defaultBudget) {
+                    Picker("Default extra time", selection: $preference.defaultBudgetMinutes) {
                         ForEach(DiscoveryTuning.budgets, id: \.self) { Text("\($0) minutes").tag($0) }
                         Text("90 minutes").tag(90)
                     }
                     LabeledContent("Travel mode", value: "Driving")
                 }
                 Section("Discover") {
-                    Toggle("Show local places first", isOn: $localFirst)
-                    Toggle("EV Journey", isOn: $evJourney)
+                    Toggle("Show local places first", isOn: $preference.localFirst)
+                    Toggle("EV Journey", isOn: $preference.evJourney)
                     Text("EV Journey includes charging places in Useful. Charger availability and specifications are not verified.")
                         .font(.caption).foregroundStyle(.secondary)
+                    Button("Reset learned preferences") { preference.resetLearning() }
+                    Button("Show temporarily hidden places") { onResetNotInterested() }
+                    Button("Show ignored places again") {
+                        for place in ignoredPlaces { modelContext.delete(place) }
+                    }
                 }
                 Section("Appearance") {
-                    Picker("Theme", selection: $appearance) {
+                    Picker("Theme", selection: $preference.appearance) {
                         Text("System").tag("system")
                         Text("Light").tag("light")
                         Text("Dark").tag("dark")
@@ -332,10 +380,25 @@ struct SettingsView: View {
                     Text("Saved places and journey summaries stay on this device. Current Location is resolved when you use it; precise location trails are not stored. Apple Maps provides search and driving routes.")
                         .font(.subheadline)
                 }
-            }
-            .navigationTitle("Settings")
-            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+                #if DEBUG
+                Section("MapKit request metrics · debug") {
+                    if let requestMetrics {
+                        LabeledContent("Started", value: "\(requestMetrics.started)")
+                        LabeledContent("Active", value: "\(requestMetrics.active)")
+                        LabeledContent("Peak active", value: "\(requestMetrics.peak)")
+                        LabeledContent("Waiting", value: "\(requestMetrics.waiting)")
+                    }
+                    Button("Refresh metrics") {
+                        Task { requestMetrics = await MapRequestGate.shared.metrics() }
+                    }
+                }
+                #endif
         }
+        .navigationTitle("Settings")
+        .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done", action: onDone) } }
+        #if DEBUG
+        .task { requestMetrics = await MapRequestGate.shared.metrics() }
+        #endif
     }
 }
 
@@ -375,6 +438,13 @@ struct JourneySummaryView: View {
                     .foregroundStyle(.secondary)
                 ForEach(Array(journey.stops.enumerated()), id: \.element.id) { index, place in
                     Label("\(index + 1). \(place.name)", systemImage: place.category?.symbol ?? "mappin")
+                }
+                Text("Share preview: \(route.origin.name) → \(journey.stops.map(\.name).joined(separator: " → ")) → \(route.destination.name)")
+                    .font(.caption).foregroundStyle(.secondary)
+                ShareLink(item: JourneyShare.summary(origin: route.origin.name,
+                                                       destination: route.destination.name,
+                                                       stops: journey.stops)) {
+                    Label("Share this planned route", systemImage: "square.and.arrow.up")
                 }
                 Spacer()
                 Button("Save summary") { onDone(true) }

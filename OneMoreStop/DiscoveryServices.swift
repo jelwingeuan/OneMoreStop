@@ -8,44 +8,52 @@ final class RouteCorridorService {
     init(search: MapSearchService) { self.search = search }
 
     func candidates(for plan: RoutePlan, journey: Journey, mode: DiscoveryMode, mood: DiscoveryMood,
-                    budgetMinutes: Int, localFirst: Bool, evJourney: Bool) async throws -> [Place] {
+                    needs: Set<JourneyNeed>, surprise: SurpriseConstraints, budgetMinutes: Int,
+                    localFirst: Bool, evJourney: Bool) async throws -> CandidateDiscovery {
         let radius = DiscoveryTuning.searchRadius(for: budgetMinutes)
         let path = journey.path.isEmpty ? plan.baseline.path : journey.path
         let samples = PolylineSampling.sample(path,
                                               spacing: DiscoveryTuning.sampleSpacing(for: journey.drivingDistance),
                                               limit: DiscoveryTuning.maxSamples)
         let isMalaysia = RegionProfile.isMalaysia(plan.destination.coordinate)
-        let categories = mode.categories(isMalaysia: isMalaysia, localFirst: localFirst,
-                                         evJourney: evJourney, adventure: budgetMinutes >= 90, mood: mood)
+        let requests = QueryPlanner.plan(samples: samples, radius: radius, mode: mode, mood: mood,
+                                         needs: needs, isMalaysia: isMalaysia, localFirst: localFirst,
+                                         evJourney: evJourney, adventure: budgetMinutes >= 60,
+                                         surprise: surprise)
         var found = [Place]()
         var successfulSearches = 0
-        for batchStart in stride(from: 0, to: samples.count, by: DiscoveryTuning.maxConcurrentRequests) {
+        var successfulCenters = [Coordinate]()
+        for batchStart in stride(from: 0, to: requests.count, by: DiscoveryTuning.maxConcurrentRequests) {
             try Task.checkCancellation()
-            let indices = batchStart..<min(batchStart + DiscoveryTuning.maxConcurrentRequests, samples.count)
-            let (additions, successes) = await withTaskGroup(of: (Bool, [Place]).self) { group in
+            let indices = batchStart..<min(batchStart + DiscoveryTuning.maxConcurrentRequests, requests.count)
+            let (additions, centers) = await withTaskGroup(of: (Coordinate?, [Place]).self) { group in
                 for index in indices {
+                    let request = requests[index]
                     group.addTask { [search] in
                         do {
-                            let places = try await search.discover(around: samples[index], radius: radius,
-                                                                    category: categories[index % categories.count])
-                            return (true, places)
-                        } catch { return (false, []) }
+                            let places = try await search.discover(around: request.center, radius: request.radius,
+                                                                    category: request.category)
+                            return (request.center, places)
+                        } catch { return (nil, []) }
                     }
                 }
                 var batchPlaces = [Place]()
-                var successes = 0
-                for await (succeeded, places) in group {
-                    if succeeded { successes += 1 }
+                var centers = [Coordinate]()
+                for await (center, places) in group {
+                    if let center { centers.append(center) }
                     batchPlaces += places
                 }
-                return (batchPlaces, successes)
+                return (batchPlaces, centers)
             }
             found += additions
-            successfulSearches += successes
+            successfulSearches += centers.count
+            successfulCenters += centers
         }
         try Task.checkCancellation()
-        if successfulSearches == 0 && !samples.isEmpty { throw DiscoveryError.searchUnavailable }
-        return CandidateDeduplication.unique(found)
+        if successfulSearches == 0 && !requests.isEmpty { throw DiscoveryError.searchUnavailable }
+        return CandidateDiscovery(places: CandidateDeduplication.unique(found), samples: samples,
+                                  attemptedSearches: requests.count, successfulSearches: successfulSearches,
+                                  successfulCenters: successfulCenters)
     }
 }
 
@@ -56,20 +64,24 @@ final class DetourEngine {
     init(directions: DirectionsService) { self.directions = directions }
 
     func recommendations(for plan: RoutePlan, journey: Journey, candidates: [Place],
-                         mode: DiscoveryMode, mood: DiscoveryMood, localFirst: Bool,
+                         mode: DiscoveryMode, mood: DiscoveryMood, localFirst: Bool, evJourney: Bool,
+                         needs: Set<JourneyNeed>, ignoredIDs: Set<String>, preferenceCounts: [String: Int],
+                         surprise: SurpriseConstraints,
                          travelerProgress: Double, exploringArea: Bool, budgetMinutes: Int,
                          onBatch: @MainActor ([StopRecommendation]) -> Void) async throws -> [StopRecommendation] {
         let radius = DiscoveryTuning.searchRadius(for: budgetMinutes)
         let isMalaysia = RegionProfile.isMalaysia(plan.destination.coordinate)
         let categories = mode.categories(isMalaysia: isMalaysia, localFirst: localFirst,
-                                         evJourney: true, adventure: budgetMinutes >= 90, mood: mood)
+                                         evJourney: evJourney, adventure: budgetMinutes >= 60, mood: mood)
         let shortlisted = candidates.compactMap { place -> (Place, Double, Double, Int)? in
             let position = GeoMath.routeProximity(place.coordinate, path: plan.baseline.path)
             let nearestLeg = journey.legs.enumerated().map { ($0.offset, GeoMath.routeProximity(place.coordinate, path: $0.element.path).distance) }
                 .min { $0.1 < $1.1 }
             guard let nearestLeg, nearestLeg.1 <= radius * 1.4, position.progress < 0.99,
                   place.id != plan.origin.id, place.id != plan.destination.id,
-                  !journey.stops.contains(where: { $0.id == place.id }) else { return nil }
+                  !journey.stops.contains(where: { $0.id == place.id }),
+                  !ignoredIDs.contains(place.id),
+                  !(mode == .surpriseMe && surprise.onlyAhead && position.progress + 0.02 < travelerProgress) else { return nil }
             return (place, nearestLeg.1, position.progress, nearestLeg.0)
         }
         .sorted { ($0.1 + StopScoringService.aheadPenalty(candidate: $0.2, traveler: travelerProgress, exploringArea: exploringArea) * 200) <
@@ -99,13 +111,29 @@ final class DetourEngine {
                                                                 proximity: distance, progress: progress)
                             let preference = StopScoringService.preference(for: place.category, mode: mode, mood: mood,
                                                                             localFirst: localFirst, isMalaysia: isMalaysia,
-                                                                            adventure: budgetMinutes >= 90)
+                                                                            adventure: budgetMinutes >= 60)
                             let penalty = StopScoringService.aheadPenalty(candidate: progress, traveler: travelerProgress,
                                                                           exploringArea: exploringArea)
-                            return (true, StopRecommendation(place: place, detourTime: extraTime,
-                                                             detourDistance: extraDistance, distanceFromRoute: distance,
-                                                             progress: progress, score: base + preference - penalty,
-                                                             firstLeg: first, secondLeg: second, insertionIndex: insertionIndex))
+                            let matchedNeeds = JourneyNeed.verified(for: place.category).intersection(needs)
+                            var result = StopRecommendation(place: place, detourTime: extraTime,
+                                                            detourDistance: extraDistance, distanceFromRoute: distance,
+                                                            progress: progress,
+                                                            score: base + preference - penalty + Double(matchedNeeds.count * 14) +
+                                                                Double(min(preferenceCounts[place.category?.rawValue ?? "", default: 0], 5) * 2),
+                                                            firstLeg: first, secondLeg: second, insertionIndex: insertionIndex)
+                            result.incrementalDetourTime = max(0, totalDuration - journey.drivingDuration)
+                            if mode == .surpriseMe, let maximum = surprise.maxExtraMinutes,
+                               result.incrementalDetourTime > Double(maximum * 60) { return (true, nil) }
+                            result.needs = JourneyNeed.verified(for: place.category)
+                            if result.incrementalDetourTime <= 5 * 60 { result.reasons.append(.smallDetour) }
+                            if progress >= travelerProgress { result.reasons.append(.ahead) }
+                            for need in matchedNeeds.sorted(by: { $0.rawValue < $1.rawValue }) {
+                                result.reasons.append(.matchesNeed(need))
+                            }
+                            if mode == .zeroRegret && !OpportunityAssessment.isZeroRegret(result, travelerProgress: travelerProgress) {
+                                return (true, nil)
+                            }
+                            return (true, result)
                         } catch { return (false, nil) }
                     }
                 }

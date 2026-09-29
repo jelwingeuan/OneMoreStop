@@ -6,15 +6,15 @@ struct HomeView: View {
     @State private var state = AppState()
     @State private var tab = 0
     @State private var showIntro = false
-    @AppStorage("hasSeenIntroduction") private var hasSeenIntroduction = false
-    @AppStorage("defaultBudget") private var defaultBudget = 20
-    @AppStorage("localFirst") private var localFirst = false
-    @AppStorage("evJourney") private var evJourney = false
-    @AppStorage("appearance") private var appearance = "system"
+    @AppStorage("pendingJourneyAction") private var pendingJourneyAction = ""
+    @Environment(\.modelContext) private var modelContext
+    @Query private var preferences: [UserPreferenceRecord]
+    @Query private var ignoredPlaces: [IgnoredPlaceRecord]
 
     var body: some View {
         TabView(selection: $tab) {
-            ExploreView(state: state, tab: $tab)
+            ExploreView(state: state, tab: $tab,
+                        distanceUnit: preferences.first?.distanceUnit ?? "automatic")
                 .tabItem { Label("Explore", systemImage: "map.fill") }
                 .tag(0)
             SavedView { place in
@@ -28,43 +28,86 @@ struct HomeView: View {
             .tag(1)
         }
         .tint(.orange)
-        .preferredColorScheme(appearance == "light" ? .light : appearance == "dark" ? .dark : nil)
+        .preferredColorScheme(preferences.first?.appearance == "light" ? .light :
+                              preferences.first?.appearance == "dark" ? .dark : nil)
         .sheet(isPresented: $showIntro) {
             IntroductionView {
-                hasSeenIntroduction = true
+                preferences.first?.hasSeenIntroduction = true
                 showIntro = false
             }
             .presentationDetents([.medium])
         }
         .task {
-            state.budgetMinutes = defaultBudget
-            state.defaultBudgetMinutes = defaultBudget
-            state.localFirst = localFirst
-            state.evJourney = evJourney
+            let preference: UserPreferenceRecord
+            if let existing = preferences.first { preference = existing }
+            else {
+                let defaults = UserDefaults.standard
+                preference = UserPreferenceRecord(
+                    distanceUnit: defaults.string(forKey: "distanceUnit") ?? "automatic",
+                    defaultBudgetMinutes: defaults.object(forKey: "defaultBudget") as? Int ?? 20,
+                    localFirst: defaults.bool(forKey: "localFirst"),
+                    evJourney: defaults.bool(forKey: "evJourney"),
+                    appearance: defaults.string(forKey: "appearance") ?? "system",
+                    hasSeenIntroduction: defaults.bool(forKey: "hasSeenIntroduction"))
+                modelContext.insert(preference)
+            }
+            state.budgetMinutes = preference.defaultBudgetMinutes
+            state.defaultBudgetMinutes = preference.defaultBudgetMinutes
+            state.localFirst = preference.localFirst
+            state.evJourney = preference.evJourney
+            state.preferenceCounts = preference.selectedCategoryCounts
+            state.ignoredPlaceIDs = Set(ignoredPlaces.map(\.id))
             await state.useCurrentLocationIfAuthorized()
-            showIntro = !hasSeenIntroduction
+            showIntro = !preference.hasSeenIntroduction
+            handleIntentNavigation()
         }
-        .onChange(of: localFirst) { _, value in state.localFirst = value; state.discover() }
-        .onChange(of: evJourney) { _, value in state.evJourney = value; state.discover() }
-        .onChange(of: defaultBudget) { _, value in state.defaultBudgetMinutes = value }
+        .onChange(of: pendingJourneyAction) { _, _ in handleIntentNavigation() }
+        .onChange(of: preferences.first?.localFirst) { _, value in state.localFirst = value ?? false; state.discover() }
+        .onChange(of: preferences.first?.evJourney) { _, value in state.evJourney = value ?? false; state.discover() }
+        .onChange(of: preferences.first?.defaultBudgetMinutes) { _, value in state.defaultBudgetMinutes = value ?? 20 }
+        .onChange(of: preferences.first?.selectedCategoryCountsData) { _, _ in
+            state.preferenceCounts = preferences.first?.selectedCategoryCounts ?? [:]
+            state.discover()
+        }
+        .onChange(of: ignoredPlaces.map(\.id)) { _, values in
+            state.ignoredPlaceIDs = Set(values)
+            state.discover()
+        }
+    }
+
+    private func handleIntentNavigation() {
+        guard !pendingJourneyAction.isEmpty else { return }
+        let action = pendingJourneyAction
+        pendingJourneyAction = ""
+        if action == "saved" { tab = 1 }
+        else if let mode = DiscoveryMode(rawValue: action) {
+            tab = 0
+            state.selectMode(mode)
+        }
     }
 }
 
 private struct ExploreView: View {
     @Bindable var state: AppState
     @Binding var tab: Int
+    let distanceUnit: String
     @State private var searchTarget: SearchTarget?
     @State private var detail: StopRecommendation?
     @State private var showJourney = false
     @State private var showSettings = false
     @State private var showSummary = false
+    @State private var showSpontaneous = false
+    @State private var showGroup = false
+    @State private var reopenJourneyAfterGroup = false
+    @State private var showActive = false
+    @State private var spontaneousInitialKind: SpontaneousKind = .driveUntil
     @State private var handoffFailed = false
     @State private var replacingIndex: Int?
     @State private var detent: PresentationDetent = .medium
     @Environment(\.modelContext) private var modelContext
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
-    @AppStorage("distanceUnit") private var distanceUnit = "automatic"
+    @Query private var preferences: [UserPreferenceRecord]
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -82,7 +125,10 @@ private struct ExploreView: View {
                         .floatingControl()
                         .accessibilityLabel("Recenter route")
                 }
-                if state.route == nil { startCard }
+                if state.route == nil {
+                    if state.spontaneousPlan != nil { spontaneousActiveCard }
+                    else { startCard }
+                }
             }
             .padding(.horizontal, 16)
             .padding(.top, 8)
@@ -101,25 +147,54 @@ private struct ExploreView: View {
         }
         .sheet(item: $detail, onDismiss: { if state.route != nil && tab == 0 { showJourney = true } }) { recommendation in
             PlaceDetailView(recommendation: recommendation,
+                            distanceUnit: distanceUnit,
                             isSelected: state.selectedStops.contains(where: { $0.id == recommendation.id }),
                             canAdd: state.canAddStop) {
                 if state.addStop(recommendation) {
                     modelContext.insert(RecentPlace(recommendation.place, kind: "stop"))
+                    preferences.first?.recordSelection(recommendation.place.category)
                     detail = nil
                 }
             }
         }
-        .sheet(isPresented: $showSettings, onDismiss: { if state.route != nil && tab == 0 { showJourney = true } }) { SettingsView() }
+        .sheet(isPresented: $showSettings, onDismiss: { if state.route != nil && tab == 0 { showJourney = true } }) {
+            SettingsView(onResetNotInterested: { state.clearNotInterested() })
+        }
         .sheet(isPresented: $showSummary) {
             if let route = state.route, let journey = state.journey {
                 JourneySummaryView(route: route, journey: journey, budget: state.budgetMinutes) { save in
                     modelContext.insert(RecentJourney(origin: route.origin, destination: route.destination,
                                                       stops: journey.stops, budgetMinutes: state.budgetMinutes,
                                                       drivingDuration: journey.drivingDuration,
-                                                      extraDuration: journey.extraDuration, saved: save))
+                                                      extraDuration: journey.extraDuration, saved: save,
+                                                      plannedVisits: state.plannedVisitMinutes))
                     showSummary = false
                 }
             }
+        }
+        .sheet(isPresented: $showSpontaneous) {
+            SpontaneousPlannerView(state: state, initialKind: spontaneousInitialKind, chooseOrigin: {
+                showSpontaneous = false
+                searchTarget = .origin
+            }, openMaps: { handoffFailed = !state.openSpontaneousNextLeg() })
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+        }
+        .sheet(isPresented: $showGroup, onDismiss: {
+            if reopenJourneyAfterGroup { showJourney = true; reopenJourneyAfterGroup = false }
+        }) {
+            LocalGroupView(recommendations: state.recommendations,
+                           origin: state.route?.origin, destination: state.route?.destination) { name in
+                let group = LocalGroupRecord(name: name)
+                modelContext.insert(group)
+            } usePreference: { mode in
+                state.selectMode(mode)
+                reopenJourneyAfterGroup = state.route != nil
+                showGroup = false
+            }
+        }
+        .sheet(isPresented: $showActive) {
+            ActiveJourneyView(state: state, openMaps: { handoffFailed = !state.openNextLeg() })
         }
         .sheet(isPresented: $showJourney) { journeySheet }
         .alert("Couldn’t open Apple Maps", isPresented: $handoffFailed) {
@@ -147,6 +222,14 @@ private struct ExploreView: View {
     private var routeMap: some View {
         Map(position: $state.camera) {
             if let route = state.route {
+                if state.showDensity, let coverage = state.discoveryCoverage {
+                    ForEach(Array(coverage.successfulCenters.enumerated()), id: \.offset) { item in
+                        let center = item.element
+                        let count = OpportunityCoverage.density(at: center, places: coverage.places)
+                        MapCircle(center: center.clLocation, radius: 3_000)
+                            .foregroundStyle(.orange.opacity(count == 0 ? 0.08 : min(0.3, Double(count) * 0.04 + 0.1)))
+                    }
+                }
                 MapPolyline(coordinates: route.baseline.path.map(\.clLocation))
                     .stroke(.blue.opacity(state.selectedStops.isEmpty ? 0.9 : 0.35), lineWidth: 4)
                 if let journey = state.journey, !journey.stops.isEmpty {
@@ -177,6 +260,18 @@ private struct ExploreView: View {
                     }
                 }
             }
+            if let plan = state.spontaneousPlan, state.route == nil {
+                MapPolyline(coordinates: plan.path.map(\.clLocation))
+                    .stroke(.orange, lineWidth: 5)
+                Marker("Outing", systemImage: plan.place.category?.symbol ?? "mappin",
+                       coordinate: plan.place.coordinate.clLocation).tint(.orange)
+                if let second = plan.secondPlace {
+                    Marker("Second stop", systemImage: second.category?.symbol ?? "mappin",
+                           coordinate: second.coordinate.clLocation).tint(.orange)
+                }
+                Marker("Start", systemImage: "circle.fill", coordinate: plan.origin.coordinate.clLocation)
+                    .tint(.blue)
+            }
             if state.origin?.id == "current-origin" { UserAnnotation() }
         }
         .mapControls { MapCompass(); MapScaleView() }
@@ -199,6 +294,12 @@ private struct ExploreView: View {
                 Image(systemName: "gearshape").font(.title3).frame(width: 30, height: 30)
             }
             .accessibilityLabel("Settings")
+            if FeatureFlags.groupMode {
+                Button { showJourney = false; showGroup = true } label: {
+                    Image(systemName: "person.2.fill").font(.title3).frame(width: 30, height: 30)
+                }
+                .accessibilityLabel("Local group")
+            }
             Button { showJourney = false; tab = 1 } label: {
                 Image(systemName: "bookmark").font(.title3).frame(width: 30, height: 30)
             }
@@ -247,27 +348,75 @@ private struct ExploreView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(.orange)
+            if FeatureFlags.spontaneousJourneys {
+                HStack {
+                    Button("Drive Until", systemImage: "steeringwheel") {
+                        spontaneousInitialKind = .driveUntil
+                        showSpontaneous = true
+                    }
+                    Spacer()
+                    Button("Escape Mode", systemImage: "arrow.uturn.backward") {
+                        spontaneousInitialKind = .escape
+                        showSpontaneous = true
+                    }
+                }
+                .font(.subheadline.weight(.semibold))
+            }
         }
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 26))
     }
 
+    private var spontaneousActiveCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let plan = state.spontaneousPlan {
+                Text(plan.stops.map(\.name).joined(separator: " → ")).font(.headline)
+                Text("\(TripFormatting.duration(plan.drivingDuration)) routed driving · \(plan.returnsHome ? "round trip" : "one way")")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button(state.spontaneousOpenedLegCount == 0 ? "Open in Apple Maps" : "Continue to next leg") {
+                    handoffFailed = !state.openSpontaneousNextLeg()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.orange)
+                .disabled(state.spontaneousOpenedLegCount >= plan.legs.count)
+                Button("Change outing") { showSpontaneous = true }
+                    .font(.caption)
+            }
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24))
+    }
+
     private var journeySheet: some View {
-        JourneySheetView(state: state, distanceUnit: distanceUnit,
-                         onDetail: { showJourney = false; detail = $0 },
-                         onAdd: { recommendation in
-                             if state.addStop(recommendation) {
-                                 modelContext.insert(RecentPlace(recommendation.place, kind: "stop"))
-                             }
-                         },
-                         onReplace: { index in
-                             replacingIndex = index
-                             showJourney = false
-                             searchTarget = .replacement
-                         },
-                         onMaps: { handoffFailed = !state.openNextLeg() },
-                         onSummary: { showJourney = false; showSummary = true })
+        TimelineView(.periodic(from: .now, by: 60)) { context in
+            JourneySheetView(state: state, distanceUnit: distanceUnit,
+                             onDetail: { showJourney = false; detail = $0 },
+                             onAdd: { recommendation in
+                                 if state.addStop(recommendation) {
+                                     modelContext.insert(RecentPlace(recommendation.place, kind: "stop"))
+                                     preferences.first?.recordSelection(recommendation.place.category)
+                                 }
+                             },
+                             onAddCombo: { combination in
+                                 if state.addCombination(combination) {
+                                     modelContext.insert(RecentPlace(combination.first, kind: "stop"))
+                                     modelContext.insert(RecentPlace(combination.second, kind: "stop"))
+                                     preferences.first?.recordSelection(combination.first.category)
+                                     preferences.first?.recordSelection(combination.second.category)
+                                 }
+                             },
+                             onReplace: { index in
+                                 replacingIndex = index
+                                 showJourney = false
+                                 searchTarget = .replacement
+                             },
+                             onMaps: { handoffFailed = !state.openNextLeg() },
+                             onSummary: { showJourney = false; showSummary = true },
+                             onActive: { showJourney = false; state.startActiveJourney(); showActive = true })
+                .onChange(of: context.date, initial: true) { _, date in state.refreshDeadline(at: date) }
+        }
         .presentationDetents([.height(220), .medium, .large], selection: $detent)
         .presentationDragIndicator(.visible)
         .presentationBackground(.regularMaterial)
@@ -278,12 +427,17 @@ private struct ExploreView: View {
 
 private struct JourneySheetView: View {
     @Bindable var state: AppState
+    @Environment(\.modelContext) private var modelContext
     let distanceUnit: String
     let onDetail: (StopRecommendation) -> Void
     let onAdd: (StopRecommendation) -> Void
+    let onAddCombo: (StopCombination) -> Void
     let onReplace: (Int) -> Void
     let onMaps: () -> Void
     let onSummary: () -> Void
+    let onActive: () -> Void
+    @State private var arrivalDraft = Date.now.addingTimeInterval(2 * 3_600)
+    @State private var showingArrivalPicker = false
 
     var body: some View {
         ScrollView {
@@ -293,17 +447,53 @@ private struct JourneySheetView: View {
                     Text(message).font(.caption).foregroundStyle(.red)
                 }
                 if state.journeyBusy { ProgressView("Recalculating trip…") }
+                if let route = state.route, route.options.count > 1, state.selectedStops.isEmpty {
+                    routeOptions(route)
+                }
+                if FeatureFlags.searchDensity, let coverage = state.discoveryCoverage, coverage.successfulSearches > 0 {
+                    Toggle("Show found-place density", isOn: $state.showDensity)
+                        .font(.subheadline)
+                    Text("Circles show places returned by successful searches for this mode. Other areas may have places too.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
                 if !state.selectedStops.isEmpty { timeline.disabled(state.journeyBusy) }
                 budgetControls.disabled(state.journeyBusy)
                 modeControls.disabled(state.journeyBusy)
+                if FeatureFlags.journeyNeeds { needControls.disabled(state.journeyBusy) }
+                if state.mode == .surpriseMe { surpriseControls }
+                if [.useful, .restStop, .ev].contains(state.mode), let useful = state.usefulAhead {
+                    usefulAheadCard(useful)
+                }
+                if state.fewPlacesAhead {
+                    Label("Few matching places found in the searched corridor ahead.", systemImage: "binoculars")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if let comparison = state.betterAhead { aheadComparison(comparison) }
                 if state.canAddStop && !state.journeyBusy { recommendations }
+                if !state.combinations.isEmpty && !state.journeyBusy { combinationCards }
                 if !state.selectedStops.isEmpty { journeyActions }
             }
             .padding(.horizontal, 20)
             .padding(.top, 26)
             .padding(.bottom, 32)
         }
+        .sensoryFeedback(.selection, trigger: state.budgetMinutes)
         .scrollIndicators(.hidden)
+        .safeAreaInset(edge: .bottom) {
+            if !state.selectedStops.isEmpty {
+                Button(action: onMaps) {
+                    Label(state.openedLegCount == 0 ? "Open in Apple Maps" : "Continue to next stop",
+                          systemImage: "arrow.triangle.turn.up.right.diamond.fill")
+                        .frame(maxWidth: .infinity, minHeight: 48)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.orange)
+                .disabled(state.openedLegCount >= (state.journey?.legs.count ?? 0))
+                .padding(.horizontal, 20)
+                .padding(.vertical, 8)
+                .background(.regularMaterial)
+            }
+        }
     }
 
     private var summaryHeader: some View {
@@ -312,49 +502,141 @@ private struct JourneySheetView: View {
             if let route = state.route, let journey = state.journey {
                 Text("\(route.origin.name) → \(route.destination.name)")
                     .font(.subheadline).lineLimit(1).foregroundStyle(.secondary)
-                HStack(spacing: 14) {
-                    Label(TripFormatting.duration(journey.drivingDuration), systemImage: "car.fill")
-                    Label(TripFormatting.extraTime(journey.extraDuration), systemImage: "plus.circle")
-                    Label(TripFormatting.arrival(JourneyMath.arrival(after: journey.legs, startingAt: .now)),
-                          systemImage: "clock")
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 14) { journeyMetrics(journey) }
+                    VStack(alignment: .leading, spacing: 4) { journeyMetrics(journey) }
                 }
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
                 .accessibilityElement(children: .combine)
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(state.timeBudget.deadline == nil ? "Extra driving left" : "Arrival margin")
+                            .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                        Text(TripFormatting.duration(state.remainingTime)).font(.title.bold())
+                    }
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text("Driving arrival").font(.caption).foregroundStyle(.secondary)
+                        if let arrival = state.drivingArrival { Text(TripFormatting.arrival(arrival)).font(.subheadline.bold()) }
+                    }
+                }
+                .padding(14)
+                .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: DesignValues.cardRadius))
+                if state.plannedVisitSeconds > 0, let arrival = state.plannedArrival {
+                    Text("With planned visits: \(TripFormatting.arrival(arrival))")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func journeyMetrics(_ journey: Journey) -> some View {
+        Label(TripFormatting.duration(journey.drivingDuration), systemImage: "car.fill")
+        Label(TripFormatting.extraTime(journey.extraDuration), systemImage: "plus.circle")
+        Label(TripFormatting.arrival(JourneyMath.arrival(after: journey.legs, startingAt: .now)),
+              systemImage: "clock")
+    }
+
+    private func routeOptions(_ route: RoutePlan) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Driving routes").font(.headline)
+            ForEach(route.options.indices, id: \.self) { index in
+                let option = route.options[index]
+                Button {
+                    state.selectRouteOption(index)
+                } label: {
+                    HStack {
+                        Text(index == 0 ? "Fastest" : "Alternate \(index)")
+                        Spacer()
+                        Text(TripFormatting.duration(option.duration))
+                        if let count = state.routeComparisonCounts[index] {
+                            Text("\(count) found nearby")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        } else if let successful = state.routeComparisonSearches[index], successful == 0 {
+                            Text("Search unavailable")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                        if state.selectedRouteIndex == index { Image(systemName: "checkmark.circle.fill") }
+                    }
+                }
+                .buttonStyle(.bordered)
+                .tint(state.selectedRouteIndex == index ? .orange : .secondary)
+            }
+            if FeatureFlags.alternateRouteComparison {
+                Button("Compare places found on these routes") { state.compareAlternateRoutes() }
+                    .font(.caption.weight(.semibold))
+                    .disabled(state.routeComparisonBusy)
+            }
+            if state.routeComparisonBusy { ProgressView("Searching each route…") }
+            if !state.routeComparisonSearches.isEmpty {
+                Text("Counts use up to four successful corridor searches per route for the current mode. They are not a rating or a complete inventory.")
+                    .font(.caption2).foregroundStyle(.secondary)
             }
         }
     }
 
     private var budgetControls: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("I can spare").font(.headline)
-                Spacer()
-                Text("\(state.budgetMinutes) min extra driving")
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                Button("I can spare") {
+                    showingArrivalPicker = false
+                    state.selectBudget(state.defaultBudgetMinutes)
+                }
+                .font(.headline)
+                .buttonStyle(.bordered)
+                .tint(state.timeBudget.deadline == nil ? .orange : .secondary)
+                Button("Arrive By") {
+                    showingArrivalPicker = true
+                    arrivalDraft = state.timeBudget.deadline ?? Date.now.addingTimeInterval(2 * 3_600)
+                }
+                .font(.headline)
+                .buttonStyle(.bordered)
+                .tint(state.timeBudget.deadline == nil ? .secondary : .orange)
+                }
+                Text("\(state.budgetMinutes) min extra driving available")
                     .font(.subheadline.weight(.bold)).foregroundStyle(.orange)
             }
-            ScrollView(.horizontal) {
-                HStack(spacing: 8) {
-                    ForEach(DiscoveryTuning.budgets, id: \.self) { minutes in
-                        Button("\(minutes) min") { state.selectBudget(minutes) }
-                            .buttonStyle(.bordered)
-                            .tint(state.budgetMinutes == minutes ? .orange : .primary)
-                            .accessibilityAddTraits(state.budgetMinutes == minutes ? .isSelected : [])
+            if showingArrivalPicker || state.timeBudget.deadline != nil {
+                DatePicker("I need to arrive by", selection: $arrivalDraft,
+                           in: Date.now...Date.now.addingTimeInterval(7 * 86_400),
+                           displayedComponents: [.date, .hourAndMinute])
+                Button("Use arrival time") { state.selectDeadline(arrivalDraft) }
+                    .buttonStyle(.borderedProminent).tint(.orange)
+                Text("Only visits you plan count toward this deadline. Suggested visits are separate.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let deadline = state.timeBudget.deadline, let baseline = state.route?.baseline.duration,
+                   deadline.timeIntervalSince(state.clockNow) < baseline + state.plannedVisitSeconds {
+                    Label("The direct drive and planned visits exceed this arrival time.",
+                          systemImage: "clock.badge.exclamationmark")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+            } else {
+                ScrollView(.horizontal) {
+                    HStack(spacing: 8) {
+                        ForEach(DiscoveryTuning.budgets, id: \.self) { minutes in
+                            Button("\(minutes) min") { state.selectBudget(minutes) }
+                                .buttonStyle(.bordered)
+                                .tint(state.budgetMinutes == minutes ? .orange : .primary)
+                                .accessibilityAddTraits(state.budgetMinutes == minutes ? .isSelected : [])
+                        }
                     }
                 }
-            }
-            .scrollIndicators(.hidden)
-            ScrollView(.horizontal) {
-                HStack(spacing: 8) {
-                    ForEach(DiscoveryPreset.allCases) { preset in
-                        Button("\(preset.title) · \(preset.minutes)m") { state.selectPreset(preset) }
-                            .font(.caption.weight(.semibold))
-                            .buttonStyle(.bordered)
-                            .tint(state.budgetMinutes == preset.minutes && state.mode == preset.mode ? .orange : .secondary)
+                .scrollIndicators(.hidden)
+                ScrollView(.horizontal) {
+                    HStack(spacing: 8) {
+                        ForEach(DiscoveryPreset.allCases) { preset in
+                            Button("\(preset.title) · \(preset.minutes)m") { state.selectPreset(preset) }
+                                .font(.caption.weight(.semibold))
+                                .buttonStyle(.bordered)
+                                .tint(state.budgetMinutes == preset.minutes && state.mode == preset.mode ? .orange : .secondary)
+                        }
                     }
                 }
+                .scrollIndicators(.hidden)
             }
-            .scrollIndicators(.hidden)
         }
     }
 
@@ -382,7 +664,84 @@ private struct JourneySheetView: View {
                 }
             }
             .scrollIndicators(.hidden)
+            if state.mode == .zeroRegret {
+                Text("Zero Regret shows routed stops within about 1 km of the route and 5 minutes extra driving. It does not rate the place.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
         }
+    }
+
+    private var needControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Need something specific?").font(.headline)
+            ScrollView(.horizontal) {
+                HStack(spacing: 8) {
+                    ForEach(JourneyNeed.allCases) { need in
+                        Button { state.toggleNeed(need) } label: {
+                            Label(need.title, systemImage: need.symbol)
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(state.selectedNeeds.contains(need) ? .orange : .secondary)
+                        .accessibilityAddTraits(state.selectedNeeds.contains(need) ? .isSelected : [])
+                    }
+                }
+            }
+            .scrollIndicators(.hidden)
+        }
+    }
+
+    private var surpriseControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Menu {
+                Button("Use full time budget") { state.updateSurprise { $0.maxExtraMinutes = nil } }
+                Button("Under 10 min") { state.updateSurprise { $0.maxExtraMinutes = 10 } }
+                Button("Under 20 min") { state.updateSurprise { $0.maxExtraMinutes = 20 } }
+            } label: {
+                Label(state.surpriseConstraints.maxExtraMinutes.map { "Under \($0) min" } ?? "Any fitting detour",
+                      systemImage: "timer")
+            }
+            VStack(alignment: .leading) {
+            Toggle("Only ahead", isOn: Binding(
+                get: { state.surpriseConstraints.onlyAhead },
+                set: { value in state.updateSurprise { $0.onlyAhead = value } }))
+            Toggle("No food", isOn: Binding(
+                get: { state.surpriseConstraints.noFood },
+                set: { value in state.updateSurprise { $0.noFood = value } }))
+            }
+        }
+        .font(.caption)
+    }
+
+    private func usefulAheadCard(_ recommendation: StopRecommendation) -> some View {
+        let remainingMeters = max(0, (recommendation.progress - state.travelerProgress) * (state.route?.baseline.distance ?? 0))
+        return HStack {
+            Image(systemName: "car.side.fill").foregroundStyle(.orange)
+            VStack(alignment: .leading) {
+                Text("Useful stop ahead").font(.subheadline.bold())
+                Text("\(recommendation.place.name) · about \(TripFormatting.distance(remainingMeters, preference: distanceUnit)) along the route")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Text(TripFormatting.extraTime(recommendation.incrementalDetourTime)).font(.caption.bold())
+        }
+        .padding(12)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: DesignValues.cardRadius))
+    }
+
+    private func aheadComparison(_ comparison: AheadComparison) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Better option ahead", systemImage: "arrow.forward.circle.fill")
+                .font(.headline)
+            Text("\(comparison.nearby.place.name): \(TripFormatting.extraTime(comparison.nearby.incrementalDetourTime)). \(comparison.later.place.name): \(TripFormatting.extraTime(comparison.later.incrementalDetourTime)).")
+                .font(.subheadline)
+            Text("Waiting for the later stop saves about \(Int((comparison.savings / 60).rounded())) minutes of driving detour.")
+                .font(.caption).foregroundStyle(.secondary)
+            Button("Show later stop") { state.focusedRecommendationID = comparison.later.id }
+                .font(.subheadline.weight(.semibold))
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: DesignValues.cardRadius))
     }
 
     @ViewBuilder
@@ -415,11 +774,24 @@ private struct JourneySheetView: View {
         }
         switch state.phase {
         case .discoveringPlaces: ProgressView("Finding stops…").frame(maxWidth: .infinity)
-        case .calculatingDetours: ProgressView("Checking driving times…").frame(maxWidth: .infinity)
+        case .calculatingDetours:
+            if state.recommendations.isEmpty {
+                ForEach(state.checkingPlaces, id: \.id) { place in
+                    HStack {
+                        Image(systemName: place.category?.symbol ?? "mappin")
+                        Text(place.name).lineLimit(1)
+                        Spacer()
+                        ProgressView()
+                    }
+                    .font(.subheadline)
+                    .accessibilityLabel("Checking driving time for \(place.name)")
+                }
+            }
+            ProgressView("Checking driving times…").frame(maxWidth: .infinity)
         case .noResults:
-            ContentUnavailableView("No stops within \(state.budgetMinutes) minutes",
+            ContentUnavailableView("Keep driving",
                                    systemImage: "map",
-                                   description: Text("Try more time or another kind of stop."))
+                                   description: Text("No verified stops fit your \(state.budgetMinutes)-minute driving budget. Try more time or another kind of stop."))
         case .failed(let message):
             ContentUnavailableView {
                 Label("Search unavailable", systemImage: "wifi.exclamationmark")
@@ -427,6 +799,28 @@ private struct JourneySheetView: View {
                 Button("Retry") { state.discover() }.buttonStyle(.borderedProminent)
             }
         default: EmptyView()
+        }
+    }
+
+    private var combinationCards: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Two places, one route change").font(.headline)
+            ForEach(state.combinations) { combination in
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("\(combination.first.name) + \(combination.second.name)").font(.subheadline.bold())
+                    Text("Two locations · \(TripFormatting.extraTime(combination.incrementalDetour)) added driving")
+                        .font(.caption)
+                    Text("\(combination.first.name): \(JourneyNeed.verified(for: combination.first.category).map(\.title).sorted().joined(separator: ", "))")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text("\(combination.second.name): \(JourneyNeed.verified(for: combination.second.category).map(\.title).sorted().joined(separator: ", "))")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("Add both stops") { onAddCombo(combination) }
+                        .buttonStyle(.borderedProminent).tint(.orange)
+                }
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.background, in: RoundedRectangle(cornerRadius: DesignValues.cardRadius))
+            }
         }
     }
 
@@ -441,11 +835,27 @@ private struct JourneySheetView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Text(TripFormatting.extraTime(recommendation.detourTime))
+                Text(TripFormatting.extraTime(recommendation.incrementalDetourTime))
                     .font(.headline).foregroundStyle(.orange)
             }
-            Text(RecommendationCopyService.phrase(for: recommendation))
+            Text("Adds to this journey · \(TripFormatting.extraTime(recommendation.detourTime)) total versus direct")
+                .font(.caption2).foregroundStyle(.secondary)
+            Text("\(TripFormatting.duration(max(0, state.allowedExtraDriving - recommendation.detourTime))) driving budget left if added")
+                .font(.caption2).foregroundStyle(.secondary)
+            Text(OpportunityAssessment.detourLabel(recommendation.incrementalDetourTime))
+                .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            Text(recommendation.reasons.first?.text ?? RecommendationCopyService.phrase(for: recommendation))
                 .font(.caption).foregroundStyle(.secondary)
+            if !recommendation.needs.isEmpty {
+                Text(recommendation.needs.sorted { $0.rawValue < $1.rawValue }.map(\.title).joined(separator: " · "))
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            if state.mode == .ev, let nearby = state.evNearby[recommendation.id], !nearby.isEmpty {
+                Text("Nearby from MapKit search: \(nearby.map(\.name).joined(separator: ", "))")
+                    .font(.caption2).foregroundStyle(.secondary)
+                Text("Separate places; added driving time to them has not been checked.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
             HStack {
                 Text("\(TripFormatting.distance(recommendation.detourDistance, preference: distanceUnit)) extra")
                     .font(.caption2).foregroundStyle(.secondary)
@@ -453,6 +863,14 @@ private struct JourneySheetView: View {
                 Button("Details") { onDetail(recommendation) }
                 Button("Add stop") { onAdd(recommendation) }
                     .buttonStyle(.borderedProminent).tint(.orange)
+                Menu {
+                    Button("Not interested") { state.notInterested(recommendation.place) }
+                    Button("Don't suggest this place again") {
+                        state.ignore(recommendation.place)
+                        modelContext.insert(IgnoredPlaceRecord(recommendation.place))
+                    }
+                } label: { Image(systemName: "ellipsis") }
+                .accessibilityLabel("More actions for \(recommendation.place.name)")
             }
             .font(.caption.weight(.semibold))
         }
@@ -475,11 +893,20 @@ private struct JourneySheetView: View {
                             .accessibilityHidden(true)
                         VStack(alignment: .leading) {
                             Text(stop.name).font(.subheadline.weight(.semibold)).lineLimit(1)
-                            Text(stop.category?.suggestedVisitMinutes.map { "Stop \(index + 1) · Suggested visit ~\($0) min" }
+                            Text(state.plannedVisitMinutes[stop.id].map { "Stop \(index + 1) · Planned visit \($0) min" }
+                                 ?? stop.category?.suggestedVisitMinutes.map { "Stop \(index + 1) · Suggested visit ~\($0) min" }
                                  ?? "Stop \(index + 1) · Visit time is your choice")
                                 .font(.caption2).foregroundStyle(.secondary)
                         }
                         Spacer()
+                        Menu {
+                            ForEach([0, 10, 15, 20, 30, 45, 60, 90], id: \.self) { minutes in
+                                Button(minutes == 0 ? "No planned visit" : "\(minutes) minutes") {
+                                    state.setPlannedVisit(minutes: minutes, for: stop)
+                                }
+                            }
+                        } label: { Image(systemName: "clock.badge.checkmark") }
+                        .accessibilityLabel("Plan visit time for \(stop.name)")
                         Button { onReplace(index) } label: { Image(systemName: "arrow.triangle.2.circlepath") }
                             .accessibilityLabel("Replace \(stop.name)")
                         Button { state.removeStop(at: index) } label: { Image(systemName: "xmark.circle.fill") }
@@ -496,7 +923,7 @@ private struct JourneySheetView: View {
                 }
                 timelineRow(route.destination.name, symbol: "flag.checkered", subtitle: "Destination")
             }
-            Text("Drag stops to reorder. Arrival uses driving time only.")
+            Text("Drag stops to reorder. Driving arrival and planned visits are shown separately.")
                 .font(.caption2).foregroundStyle(.secondary)
         }
         .padding(14)
@@ -519,18 +946,13 @@ private struct JourneySheetView: View {
                 Text("Driving \(TripFormatting.duration(journey.drivingDuration)) · \(TripFormatting.extraTime(journey.extraDuration)) versus direct")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Button {
-                onMaps()
-            } label: {
-                Label(state.openedLegCount == 0 ? "Open in Apple Maps" : "Continue to next stop",
-                      systemImage: "arrow.triangle.turn.up.right.diamond.fill")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent).tint(.orange)
-            .disabled(state.openedLegCount >= (state.journey?.legs.count ?? 0))
             Text("Maps opens one driving leg at a time. Return here for the next leg.")
                 .font(.caption2).foregroundStyle(.secondary)
             Button("Finish or save journey", action: onSummary).font(.subheadline)
+            if FeatureFlags.liveOpportunities {
+                Button("Start active journey", systemImage: "car.side.fill", action: onActive)
+                    .font(.subheadline.weight(.semibold))
+            }
         }
     }
 }

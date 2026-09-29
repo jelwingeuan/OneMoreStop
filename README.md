@@ -1,6 +1,6 @@
 # OneMoreStop
 
-OneMoreStop finds places along a drive that fit an **extra driving time** budget. It is a native iPhone app for iOS 18 and later. It uses SwiftUI, MapKit, CoreLocation, SwiftData, and Swift concurrency. There is no backend, account, API key, or third-party dependency.
+OneMoreStop finds places along a drive that fit a driving-time budget. It is a native iPhone app for iOS 18 and later. It uses SwiftUI, MapKit, CoreLocation, SwiftData, App Intents, and Swift concurrency. There is no backend, account, API key, or third-party dependency.
 
 ## Build and run
 
@@ -21,13 +21,19 @@ xcodebuild -project OneMoreStop.xcodeproj -scheme OneMoreStop \
 
 ## Use
 
-Choose Current Location or search for a starting place, then search for a destination. The map fits the direct automobile route until you move it. Select a stepped **I can spare** budget, a preset, and a mode: Eat, Coffee, Nature, Scenic, Things to Do, Explore, Useful, or Surprise Me. Optional mood and local-place preferences affect the search and order. The Adventure preset uses a 90-minute budget. EV Journey adds charging searches in Useful, without promising charger availability.
+Choose Current Location or search for a starting place, then search for a destination. The map fits the direct automobile route until you move it. **I can spare** limits extra driving time. **Arrive By** calculates the remaining driving allowance from the deadline, the direct route, and only visit minutes you explicitly plan. The clock refreshes while the journey sheet is visible. Driving arrival and arrival with planned visits have separate labels. Suggested visits do not silently count toward the deadline.
 
-Recommendation cards show only MapKit place information and measured extra driving time. Surprise Me highlights one verified result at a time and can show the other results. Add up to three stops. Drag the stops in the timeline to reorder them, or remove or replace one. The journey is rerouted after each edit. The total added driving time must fit the budget. Arrival estimates include driving time only. The timeline offers optional, category-based visit-time suggestions for planning; these are not MapKit place facts and are excluded from driving ETA.
+Modes include Eat, Coffee, Nature, Scenic, Things to Do, Explore, Shopping, Useful, Rest Stop, EV, Micro Adventure, Zero Regret, and Surprise Me. Needs and moods can refine discovery. The Adventure preset is 60 minutes; saved 90-minute journeys still load. EV Journey adds charging searches in Useful, without promising charger availability.
+
+Recommendation cards show MapKit place information, measured incremental and total detour driving time, and reasons based on route geometry or a matched place category. Surprise Me highlights one verified result at a time. "Better option ahead" compares two routed results serving the same need. Add up to three stops. Nearby complementary places may appear as a routed two-location combination; accepting one requires the complete proposed journey to fit the budget. Drag stops to reorder, or remove or replace one. "Not interested" hides a result; "Don't suggest again" keeps that place in a local ignore list that can be reset in Settings.
+
+Drive Until finds a one-way destination or routed return outing within the chosen total driving time. Escape Mode checks return drives with one or two stops. These are separate from the extra-detour budget of destination journeys. An explicitly started active journey offers a minimal driver view, a passenger opportunity view, and foreground location checks. Apple Maps remains responsible for navigation.
+
+Local group voting stores named participants and one current vote per participant on this device. Its share action sends a static snapshot, not a live ballot. Search-density circles show places found in successful corridor searches for the selected mode; areas without circles are not guaranteed to lack places. The optional alternate-route comparison makes up to four bounded searches per route and shows found-place counts, not a route rating or full inventory.
 
 **Open in Apple Maps** opens the first driving leg. Return to OneMoreStop and use **Continue to next stop** for the next leg. Apple Maps' [documented driving launch](https://developer.apple.com/documentation/mapkit/mkmapitem/openmaps%28with%3Alaunchoptions%3A%29) accepts at most two map items, so the handoff is intentionally one leg at a time.
 
-Saved contains favorites, custom collections, recent stops, and recent journeys. Finish a journey to keep a local summary, with an optional saved marker. Repeat a journey to reroute it. Place details offer available phone, website, and Look Around fields, plus ShareLink to an Apple Maps place URL.
+Saved contains favorites, custom collections, recent stops, recent journeys, and planning milestones. Finish a journey to keep a local summary, with an optional saved marker. Repeat a journey to reroute it. Journey sharing requires an intentional Share action and previews the route's endpoints and stops. Place details offer available phone, website, and Look Around fields, plus ShareLink to an Apple Maps place URL. App Intents open food, coffee, scenic, EV, or saved-journey flows in the app.
 
 ## How discovery works
 
@@ -35,9 +41,9 @@ Saved contains favorites, custom collections, recent stops, and recent journeys.
 
 `DetourEngine` cheaply projects candidates onto the route, finds the nearest current journey leg, and routes only a bounded shortlist. Each candidate replaces one leg with two actual automobile legs. Its displayed detour is **new journey driving duration minus the direct route duration**, clamped to zero for small routing discrepancies. Ranking is deterministic: mode and mood match, added driving time, proximity, and ahead/behind progress. A passed stop is penalized unless the user has moved the map to explore an area. Verified cards appear after each batch, then settle into score order.
 
-Search and directions work in batches of at most three. A short-lived in-memory cache suppresses duplicate searches and routed legs. Narrower budgets filter previously verified results immediately; a wider budget searches a larger corridor. Cancellation stops obsolete requests after route, mode, or budget changes. Tuning values live in `DiscoveryTuning`.
+Search and directions work in batches of at most three. A shared gate limits simultaneous autocomplete, search, directions, and Look Around requests to three. A short-lived in-memory cache suppresses duplicate searches and routed legs. Narrower budgets filter previously verified results immediately; a wider budget searches a larger corridor. Cancellation stops obsolete requests after route, mode, or budget changes. Tuning values live in `DiscoveryTuning`.
 
-`SwiftData` stores simple place and journey values. MapKit objects are transient. A journey records manually selected endpoints and stops; when Current Location was used, its exact coordinate is replaced by a placeholder before saving, and a repeat asks CoreLocation for a fresh position.
+`SwiftData` stores simple place, journey, preference, ignored-place, and local-group values. MapKit objects are transient. A journey records manually selected endpoints and stops; when Current Location was used, its exact coordinate is replaced by a placeholder before saving, and a repeat asks CoreLocation for a fresh position. Previous app preferences in UserDefaults are copied into SwiftData on first launch.
 
 ## Permissions and accessibility
 
@@ -45,9 +51,9 @@ The app explains location use before its contextual When In Use permission reque
 
 ## Verification and limits
 
-Offline tests cover distance sampling, deduplication, detour math (60 minutes direct; 35 + 37 minutes through a stop; 12 minutes extra), budgets, deterministic ranking, projection and ahead/behind behavior, journey order and ETA, regional modes, units, and persistence mapping. UI tests exercise Explore, Saved, Settings, denied location, a Cyberjaya-to-Melaka drive through a verified stop and Maps handoff, a California route, and an unroutable drive with retry using live MapKit. Live results can vary by network and MapKit coverage; the UI provides retry and no-results states. Light appearance with increased contrast and accessibility text size was visually checked on the simulator. Network disconnection, an empty MapKit search, in-flight cancellation timing, absent Look Around coverage, VoiceOver speech, and reduced-motion behavior still need manual device QA before release.
+Offline tests cover distance sampling, deduplication, detour math (60 minutes direct; 35 + 37 minutes through a stop; 12 minutes extra), deadlines, planned visits, budgets, deterministic ranking, route projection and ahead comparison, needs, combinations, spontaneous driving time, group votes, planning milestones, units, and persistence mapping. UI tests exercise Explore, Saved, Settings, denied location, a Cyberjaya-to-Melaka drive through a verified stop and Maps handoff, a California route, an unroutable drive with retry, and the Drive Until/Escape controls. Live results vary by network and MapKit coverage; retry and no-results states are provided.
 
-MapKit may not return a useful stop or driving route for every place. OneMoreStop does not invent ratings, hours, ownership, weather, charger specifications, or turn-by-turn navigation. Journey order is chosen by the user; it is not optimized automatically. Very long routes can miss places between the bounded sample areas. The app does not currently provide community data, WeatherKit, Siri actions, or account sync.
+MapKit may not return a useful stop or driving route for every place. OneMoreStop does not invent ratings, hours, ownership, toilets, price, weather, charger availability or specifications, or turn-by-turn navigation. A weather-provider interface exists but no source is configured, so weather and sunset features are hidden. Journey order is chosen by the user; it is not optimized automatically. Very long routes can miss places between bounded sample areas. There is no remote voting, community data, or account sync. Simulator checks for network disconnection, empty search, in-flight cancellation timing, absent Look Around coverage, VoiceOver speech, and reduced motion still need manual release QA.
 
 ## Roadmap
 

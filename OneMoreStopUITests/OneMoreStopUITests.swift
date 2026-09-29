@@ -24,7 +24,7 @@ final class OneMoreStopUITests: XCTestCase {
         if !journey.waitForExistence(timeout: 60) {
             throw XCTSkip("MapKit search or driving directions were unavailable in this simulator run.")
         }
-        XCTAssertTrue(app.staticTexts["I can spare"].exists)
+        XCTAssertTrue(app.buttons["I can spare"].exists)
         let result = app.buttons["Add stop"].firstMatch
         if result.waitForExistence(timeout: 90) {
             result.tap()
@@ -50,7 +50,7 @@ final class OneMoreStopUITests: XCTestCase {
         if !app.staticTexts["Find your one more stop"].waitForExistence(timeout: 60) {
             throw XCTSkip("MapKit driving directions outside Malaysia were unavailable in this simulator run.")
         }
-        XCTAssertTrue(app.staticTexts["I can spare"].exists)
+        XCTAssertTrue(app.buttons["I can spare"].exists)
     }
 
     func testDeniedLocationStillOffersManualStart() throws {
@@ -82,6 +82,29 @@ final class OneMoreStopUITests: XCTestCase {
         }
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "Couldn’t find a driving route"))
             .firstMatch.exists)
+    }
+
+    func testDriveUntilAndEscapeControlsWithoutRoute() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-hasSeenIntroduction", "YES"]
+        app.launch()
+        app.buttons["Drive Until"].tap()
+        XCTAssertTrue(app.navigationBars["Explore by time"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.switches["Return to start"].exists)
+        app.segmentedControls.buttons["Escape Mode"].tap()
+        XCTAssertTrue(app.staticTexts["Escape Mode includes the drive back to your start."].exists)
+        XCTAssertTrue(app.buttons["Find routed outings"].exists)
+    }
+
+    func testLocalGroupIsClearlySingleDevice() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-hasSeenIntroduction", "YES"]
+        app.launch()
+        app.buttons["Local group"].tap()
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Votes are saved on this device"))
+            .firstMatch.waitForExistence(timeout: 5))
+        if app.buttons["Create group"].exists { app.buttons["Create group"].tap() }
+        XCTAssertTrue(app.staticTexts["Participants"].waitForExistence(timeout: 5))
     }
 
     private func choose(_ query: String, matching label: String? = nil, from button: XCUIElement, in app: XCUIApplication) throws {

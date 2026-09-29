@@ -73,6 +73,7 @@ struct Place: Identifiable, Hashable, Sendable {
 enum StopCategory: String, CaseIterable, Identifiable, Codable, Sendable {
     case food, coffee, scenic, nature, attractions, park, shopping, dessert, fuel, restStop
     case localFood, nasiLemak, mamak, restArea, surau, beach, waterfall, viewpoint, charging
+    case atm, pharmacy, groceries
 
     var id: String { rawValue }
 
@@ -84,6 +85,9 @@ enum StopCategory: String, CaseIterable, Identifiable, Codable, Sendable {
         case .restArea: "R&R"
         case .surau: "Surau / mosque"
         case .charging: "EV charging"
+        case .atm: "ATM"
+        case .pharmacy: "Pharmacy"
+        case .groceries: "Groceries"
         default: rawValue.capitalized
         }
     }
@@ -103,26 +107,33 @@ enum StopCategory: String, CaseIterable, Identifiable, Codable, Sendable {
         case .surau: "building.columns.fill"
         case .beach: "water.waves"
         case .charging: "bolt.car.fill"
+        case .atm: "banknote.fill"
+        case .pharmacy: "cross.case.fill"
+        case .groceries: "basket.fill"
         }
     }
 
     var suggestedVisitMinutes: Int? {
         switch self {
-        case .coffee, .dessert, .restStop, .restArea, .fuel, .charging, .surau: 15
+        case .coffee, .dessert, .restStop, .restArea, .fuel, .charging, .surau, .atm, .pharmacy: 15
         case .food, .localFood, .nasiLemak, .mamak: 30
         case .park, .nature, .scenic, .viewpoint, .beach, .waterfall: 45
-        case .attractions, .shopping: 60
+        case .attractions, .shopping, .groceries: 60
         }
     }
 }
 
 enum DiscoveryMode: String, CaseIterable, Identifiable, Codable, Sendable {
-    case eat, coffee, nature, scenic, thingsToDo, explore, useful, surpriseMe
+    case eat, coffee, nature, scenic, thingsToDo, explore, shopping, useful, restStop, ev, microAdventure, zeroRegret, surpriseMe
     var id: String { rawValue }
     var title: String {
         switch self {
         case .thingsToDo: "Things to Do"
         case .surpriseMe: "Surprise Me"
+        case .restStop: "Rest Stop"
+        case .ev: "EV"
+        case .microAdventure: "Micro Adventure"
+        case .zeroRegret: "Zero Regret"
         default: rawValue.capitalized
         }
     }
@@ -134,7 +145,12 @@ enum DiscoveryMode: String, CaseIterable, Identifiable, Codable, Sendable {
         case .scenic: "mountain.2.fill"
         case .thingsToDo: "sparkles"
         case .explore: "map.fill"
+        case .shopping: "bag.fill"
         case .useful: "car.side.fill"
+        case .restStop: "car.side.rear.open.fill"
+        case .ev: "bolt.car.fill"
+        case .microAdventure: "figure.walk"
+        case .zeroRegret: "checkmark.seal.fill"
         case .surpriseMe: "shuffle"
         }
     }
@@ -148,8 +164,13 @@ enum DiscoveryMode: String, CaseIterable, Identifiable, Codable, Sendable {
         case .scenic: choices = [.scenic, .viewpoint, .beach]
         case .thingsToDo: choices = [.attractions, .shopping]
         case .explore: choices = adventure ? [.nature, .scenic, isMalaysia ? .localFood : .food, .attractions] : [.attractions, .park, .food]
+        case .shopping: choices = [.shopping, .groceries]
         case .useful: choices = evJourney ? [isMalaysia ? .restArea : .restStop, .fuel, .charging, isMalaysia ? .surau : .coffee] :
                 [isMalaysia ? .restArea : .restStop, .fuel, isMalaysia ? .surau : .coffee]
+        case .restStop: choices = [isMalaysia ? .restArea : .restStop, .fuel, isMalaysia ? .surau : .coffee]
+        case .ev: choices = [.charging]
+        case .microAdventure: choices = [.viewpoint, .park, isMalaysia ? .localFood : .food, .coffee, .attractions]
+        case .zeroRegret: choices = [.coffee, .fuel, isMalaysia ? .restArea : .restStop, .food]
         case .surpriseMe: choices = adventure ? [.nature, .scenic, isMalaysia ? .localFood : .food, .attractions, .coffee] : [.food, .coffee, .park, .attractions, .scenic]
         }
         let preferred: [StopCategory]
@@ -158,6 +179,8 @@ enum DiscoveryMode: String, CaseIterable, Identifiable, Codable, Sendable {
         case .calm: preferred = [.park, .nature, .scenic, .beach]
         case .curious: preferred = [.attractions, .viewpoint, .waterfall]
         case .hungry: preferred = [.food, .localFood, .mamak, .coffee]
+        case .stretch: preferred = [.park, .nature, .restArea, .restStop]
+        case .adventure: preferred = [.waterfall, .viewpoint, .attractions, .nature]
         }
         return choices.enumerated().sorted { left, right in
             let leftMatch = preferred.contains(left.element)
@@ -168,7 +191,7 @@ enum DiscoveryMode: String, CaseIterable, Identifiable, Codable, Sendable {
 }
 
 enum DiscoveryMood: String, CaseIterable, Identifiable, Codable, Sendable {
-    case any, calm, curious, hungry
+    case any, calm, curious, hungry, stretch, adventure
     var id: String { rawValue }
     var title: String { rawValue.capitalized }
 }
@@ -185,6 +208,17 @@ struct RoutePlan: Identifiable, Sendable {
     let destination: Place
     let baseline: RouteMetrics
     let createdAt: Date
+    let options: [RouteMetrics]
+
+    init(id: UUID, origin: Place, destination: Place, baseline: RouteMetrics,
+         createdAt: Date, options: [RouteMetrics] = []) {
+        self.id = id
+        self.origin = origin
+        self.destination = destination
+        self.baseline = baseline
+        self.createdAt = createdAt
+        self.options = options
+    }
 }
 
 struct StopRecommendation: Identifiable, Sendable {
@@ -197,10 +231,12 @@ struct StopRecommendation: Identifiable, Sendable {
     let firstLeg: RouteMetrics
     let secondLeg: RouteMetrics
     var insertionIndex = 0
+    var incrementalDetourTime: TimeInterval = 0
+    var needs: Set<JourneyNeed> = []
+    var reasons: [RecommendationReason] = []
+    var confidence: OpportunityConfidence = .routingVerified
 
     var id: String { place.id }
-    var isExactDetour: Bool { true }
-    var estimatedArrival: Date { Date().addingTimeInterval(firstLeg.duration) }
 }
 
 struct Journey: Sendable {
@@ -213,6 +249,16 @@ struct Journey: Sendable {
     var extraDuration: TimeInterval { DetourMath.extra(drivingDuration, 0, baseline: baseline.duration) }
     var extraDistance: CLLocationDistance { DetourMath.extra(drivingDistance, 0, baseline: baseline.distance) }
     var path: [Coordinate] { legs.flatMap(\.path) }
+}
+
+struct RouteProgress: Sendable {
+    let fraction: Double
+    let distanceFromRoute: CLLocationDistance
+    let distanceAlongRoute: CLLocationDistance
+    let distanceRemaining: CLLocationDistance
+
+    var isOnRoute: Bool { distanceFromRoute < 2_000 }
+    func isAhead(_ candidateFraction: Double) -> Bool { candidateFraction + 0.02 >= fraction }
 }
 
 struct PlaceSnapshot: Codable, Sendable {
@@ -324,9 +370,11 @@ final class RecentJourney {
     var extraDuration: Double
     var createdAt: Date
     var saved: Bool
+    var plannedVisitsData: Data?
 
     init(origin: Place, destination: Place, stops: [Place], budgetMinutes: Int,
-         drivingDuration: Double, extraDuration: Double, saved: Bool = false) {
+         drivingDuration: Double, extraDuration: Double, saved: Bool = false,
+         plannedVisits: [String: Int] = [:]) {
         id = UUID()
         destinationName = destination.name
         let storedOrigin = origin.id == "current-origin"
@@ -340,7 +388,12 @@ final class RecentJourney {
         self.extraDuration = extraDuration
         createdAt = .now
         self.saved = saved
+        plannedVisitsData = try? JSONEncoder().encode(plannedVisits)
     }
 
     var places: [Place] { ((try? JSONDecoder().decode([PlaceSnapshot].self, from: snapshotData)) ?? []).map(\.place) }
+    var plannedVisits: [String: Int] {
+        guard let plannedVisitsData else { return [:] }
+        return (try? JSONDecoder().decode([String: Int].self, from: plannedVisitsData)) ?? [:]
+    }
 }

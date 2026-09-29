@@ -2,6 +2,57 @@ import CoreLocation
 import Foundation
 import MapKit
 
+actor MapRequestGate {
+    static let shared = MapRequestGate()
+    private var active = 0
+    private var waiting: [(UUID, CheckedContinuation<Void, Never>)] = []
+    #if DEBUG
+    private var started = 0
+    private var peak = 0
+
+    struct Metrics: Sendable {
+        let started: Int
+        let active: Int
+        let peak: Int
+        let waiting: Int
+    }
+
+    func metrics() -> Metrics {
+        Metrics(started: started, active: active, peak: peak, waiting: waiting.count)
+    }
+    #endif
+
+    func acquire() async throws {
+        while active >= DiscoveryTuning.maxConcurrentRequests {
+            let id = UUID()
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in waiting.append((id, continuation)) }
+            } onCancel: {
+                Task { await self.cancelWaiter(id) }
+            }
+            try Task.checkCancellation()
+        }
+        try Task.checkCancellation()
+        active += 1
+        #if DEBUG
+        started += 1
+        peak = max(peak, active)
+        #endif
+    }
+
+    func release() {
+        active = max(0, active - 1)
+        let queued = waiting
+        waiting.removeAll()
+        queued.forEach { $0.1.resume() }
+    }
+
+    private func cancelWaiter(_ id: UUID) {
+        guard let index = waiting.firstIndex(where: { $0.0 == id }) else { return }
+        waiting.remove(at: index).1.resume()
+    }
+}
+
 @MainActor
 final class LocationService: NSObject, @MainActor CLLocationManagerDelegate {
     private let manager = CLLocationManager()
@@ -74,6 +125,11 @@ final class LocationService: NSObject, @MainActor CLLocationManagerDelegate {
 final class MapSearchService: NSObject, @MainActor MKLocalSearchCompleterDelegate {
     private let completer = MKLocalSearchCompleter()
     private var completionHandler: (([MKLocalSearchCompletion]) -> Void)?
+    private var suggestionGateTask: Task<Void, Never>?
+    private var suggestionGateID = UUID()
+    private var suggestionHasGate = false
+    private var latestSuggestionQuery = ""
+    private var latestSuggestionCoordinate: Coordinate?
     private var active: [UUID: MKLocalSearch] = [:]
     private var discoveryCache: [String: ([Place], Date)] = [:]
     private var discoveryInflight: [String: (UUID, Task<[Place], Error>)] = [:]
@@ -86,15 +142,53 @@ final class MapSearchService: NSObject, @MainActor MKLocalSearchCompleterDelegat
 
     func suggestions(for query: String, near coordinate: Coordinate?, onUpdate: @escaping ([MKLocalSearchCompletion]) -> Void) {
         completionHandler = onUpdate
-        if let coordinate {
+        latestSuggestionQuery = query
+        latestSuggestionCoordinate = coordinate
+        guard !query.isEmpty else {
+            cancelSuggestions()
+            onUpdate([])
+            return
+        }
+        if suggestionHasGate { configureSuggestions(); return }
+        guard suggestionGateTask == nil else { return }
+        let gateID = UUID()
+        suggestionGateID = gateID
+        suggestionGateTask = Task { [weak self] in
+            guard let self else { return }
+            var acquired = false
+            do {
+                try await MapRequestGate.shared.acquire()
+                acquired = true
+                try Task.checkCancellation()
+                guard completionHandler != nil else { throw CancellationError() }
+                suggestionHasGate = true
+                configureSuggestions()
+            } catch {
+                if acquired { await MapRequestGate.shared.release() }
+            }
+            if suggestionGateID == gateID { suggestionGateTask = nil }
+        }
+    }
+
+    private func configureSuggestions() {
+        if let coordinate = latestSuggestionCoordinate {
             completer.region = MKCoordinateRegion(center: coordinate.clLocation,
                                                   latitudinalMeters: 100_000, longitudinalMeters: 100_000)
         }
-        completer.queryFragment = query
-        if query.isEmpty { onUpdate([]) }
+        completer.queryFragment = latestSuggestionQuery
     }
 
-    func cancelSuggestions() { completer.cancel(); completionHandler = nil }
+    func cancelSuggestions() {
+        suggestionGateTask?.cancel()
+        suggestionGateID = UUID()
+        suggestionGateTask = nil
+        completer.cancel()
+        completionHandler = nil
+        if suggestionHasGate {
+            suggestionHasGate = false
+            Task { await MapRequestGate.shared.release() }
+        }
+    }
     func completerDidUpdateResults(_ completer: MKLocalSearchCompleter) { completionHandler?(completer.results) }
     func completer(_ completer: MKLocalSearchCompleter, didFailWithError error: Error) { completionHandler?([]) }
 
@@ -149,16 +243,24 @@ final class MapSearchService: NSObject, @MainActor MKLocalSearchCompleterDelegat
         let id = UUID()
         active[id] = search
         defer { active[id] = nil }
-        return try await withTaskCancellationHandler {
-            try Task.checkCancellation()
-            return try await search.start()
-        } onCancel: {
-            Task { @MainActor [weak self] in self?.active[id]?.cancel() }
+        try await MapRequestGate.shared.acquire()
+        do {
+            let response = try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                return try await search.start()
+            } onCancel: {
+                Task { @MainActor [weak self] in self?.active[id]?.cancel() }
+            }
+            await MapRequestGate.shared.release()
+            return response
+        } catch {
+            await MapRequestGate.shared.release()
+            throw error
         }
     }
 
     func cancelAll() {
-        completer.cancel()
+        cancelSuggestions()
         discoveryInflight.values.forEach { $0.1.cancel() }
         discoveryInflight.removeAll()
         active.values.forEach { $0.cancel() }
@@ -199,6 +301,9 @@ private extension StopCategory {
         case .waterfall: "waterfall"
         case .viewpoint: "viewpoint"
         case .charging: "EV charging station"
+        case .atm: "ATM"
+        case .pharmacy: "pharmacy"
+        case .groceries: "grocery store"
         default: title
         }
     }
@@ -235,26 +340,47 @@ final class DirectionsService {
         return value
     }
 
+    func routeOptions(from origin: Place, to destination: Place) async throws -> [RouteMetrics] {
+        try await calculate(from: origin, to: destination, alternates: true)
+    }
+
     private func requestRoute(from origin: Place, to destination: Place) async throws -> RouteMetrics {
+        guard let first = try await calculate(from: origin, to: destination, alternates: false).first else {
+            throw DirectionsError.noRoute
+        }
+        return first
+    }
+
+    private func calculate(from origin: Place, to destination: Place, alternates: Bool) async throws -> [RouteMetrics] {
         let request = MKDirections.Request()
         request.source = origin.mapItem()
         request.destination = destination.mapItem()
         request.transportType = .automobile
-        request.requestsAlternateRoutes = false
+        request.requestsAlternateRoutes = alternates
         let directions = MKDirections(request: request)
         let id = UUID()
         active[id] = directions
         defer { active[id] = nil }
-        let response = try await withTaskCancellationHandler {
-            try Task.checkCancellation()
-            return try await directions.calculate()
-        } onCancel: {
-            Task { @MainActor [weak self] in self?.active[id]?.cancel() }
+        try await MapRequestGate.shared.acquire()
+        let response: MKDirections.Response
+        do {
+            response = try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                return try await directions.calculate()
+            } onCancel: {
+                Task { @MainActor [weak self] in self?.active[id]?.cancel() }
+            }
+            await MapRequestGate.shared.release()
+        } catch {
+            await MapRequestGate.shared.release()
+            throw error
         }
-        guard let route = response.routes.first else { throw DirectionsError.noRoute }
-        let points = route.polyline.points()
-        let path = (0..<route.polyline.pointCount).map { Coordinate(points[$0].coordinate) }
-        return RouteMetrics(duration: route.expectedTravelTime, distance: route.distance, path: path)
+        guard !response.routes.isEmpty else { throw DirectionsError.noRoute }
+        return response.routes.prefix(3).map { route in
+            let points = route.polyline.points()
+            let path = (0..<route.polyline.pointCount).map { Coordinate(points[$0].coordinate) }
+            return RouteMetrics(duration: route.expectedTravelTime, distance: route.distance, path: path)
+        }.sorted { $0.duration < $1.duration }
     }
 
     func cancelAll() {

@@ -5,6 +5,12 @@ enum DiscoveryTuning {
     static let budgets = [5, 10, 20, 30, 45, 60]
     static let maxSamples = 12
     static let maxCandidatesForRouting = 12
+    static let maxAlternateSamples = 4
+    static let maxSpontaneousCategories = 3
+    static let maxSpontaneousCandidates = 6
+    static let maxEscapePairCandidates = 3
+    static let maxEVNearbyCenters = 2
+    static let maxEVNearbyPlaces = 3
     static let maxRecommendations = 8
     static let maxConcurrentRequests = 3
     static let cacheLifetime: TimeInterval = 600
@@ -64,6 +70,14 @@ enum GeoMath {
             traveled += segmentLength
         }
         return best
+    }
+
+    static func routeProgress(_ point: Coordinate, path: [Coordinate]) -> RouteProgress {
+        let projection = routeProximity(point, path: path)
+        let total = zip(path, path.dropFirst()).reduce(0.0) { $0 + distance($1.0, $1.1) }
+        return RouteProgress(fraction: projection.progress, distanceFromRoute: projection.distance,
+                             distanceAlongRoute: total * projection.progress,
+                             distanceRemaining: total * (1 - projection.progress))
     }
 }
 
@@ -151,6 +165,8 @@ enum StopScoringService {
         case .calm where [.park, .nature, .scenic, .beach].contains(category): value += 5
         case .curious where [.attractions, .viewpoint, .waterfall].contains(category): value += 5
         case .hungry where [.food, .localFood, .mamak, .coffee].contains(category): value += 5
+        case .stretch where [.park, .nature, .restArea, .restStop].contains(category): value += 5
+        case .adventure where [.waterfall, .viewpoint, .attractions, .nature].contains(category): value += 5
         default: break
         }
         return value

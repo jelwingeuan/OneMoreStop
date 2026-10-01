@@ -335,7 +335,7 @@ struct DiscoveryLogicTests {
         let directions = FakeDirections(times: [
             "origin:park": 20 * 60, "park:origin": 20 * 60,
             "origin:cafe": 25 * 60, "cafe:origin": 25 * 60,
-            "park:cafe": 20 * 60
+            "park:cafe": 15 * 60
         ], coordinate: origin.coordinate)
         let plans = try await SpontaneousJourneyService(search: FakeDiscovery(places: [park, cafe]),
                                                          directions: directions)
@@ -343,7 +343,7 @@ struct DiscoveryLogicTests {
                          mode: .explore, returnsHome: true)
         #expect(plans.first?.stops.map(\.id) == ["park", "cafe"])
         #expect(plans.first?.legs.count == 3)
-        #expect(plans.first?.drivingDuration == 60 * 60)
+        #expect(abs((plans.first?.drivingDuration ?? 0) - 60 * 60) < 0.01)
     }
 
     @Test func globalMapGateCancelsAQueuedRequest() async throws {

@@ -190,7 +190,10 @@ struct PlaceDetailView: View {
     }
 }
 
+enum SavedSection: Hashable { case collections, places, journeys }
+
 struct SavedView: View {
+    @Binding var focusSection: SavedSection?
     let onChoose: (Place) -> Void
     let onRepeat: (RecentJourney) -> Void
     @Environment(\.modelContext) private var modelContext
@@ -203,6 +206,7 @@ struct SavedView: View {
 
     var body: some View {
         NavigationStack {
+            ScrollViewReader { proxy in
             List {
                 Section("Collections") {
                     if collections.isEmpty {
@@ -218,6 +222,7 @@ struct SavedView: View {
                     .onDelete { offsets in for index in offsets { modelContext.delete(collections[index]) } }
                     Button("New collection", systemImage: "plus") { showNewCollection = true }
                 }
+                .id(SavedSection.collections)
                 Section("Saved places") {
                     if saved.isEmpty { Text("Places you save will appear here.").foregroundStyle(.secondary) }
                     ForEach(saved) { place in
@@ -231,6 +236,7 @@ struct SavedView: View {
                         }
                     }
                 }
+                .id(SavedSection.places)
                 Section("Journeys") {
                     if journeys.isEmpty {
                         Text("Finish a journey to keep a local summary.").foregroundStyle(.secondary)
@@ -254,6 +260,7 @@ struct SavedView: View {
                     }
                     .onDelete { offsets in for index in offsets { modelContext.delete(journeys[index]) } }
                 }
+                .id(SavedSection.journeys)
                 Section("Planning challenges") {
                     let challenges = PlanningChallenges.earned(from: journeys)
                     if challenges.isEmpty {
@@ -272,6 +279,12 @@ struct SavedView: View {
                 }
             }
             .navigationTitle("Saved")
+            .onAppear {
+                if let focusSection { proxy.scrollTo(focusSection, anchor: .top) }
+            }
+            .onChange(of: focusSection) { _, section in
+                if let section { withAnimation(.smooth) { proxy.scrollTo(section, anchor: .top) } }
+            }
             .alert("New collection", isPresented: $showNewCollection) {
                 TextField("Collection name", text: $collectionName)
                 Button("Create") {
@@ -280,6 +293,7 @@ struct SavedView: View {
                     collectionName = ""
                 }
                 Button("Cancel", role: .cancel) { collectionName = "" }
+            }
             }
         }
     }
@@ -319,6 +333,7 @@ private struct CollectionView: View {
 
 struct SettingsView: View {
     let onResetNotInterested: () -> Void
+    var focusTravelPreferences = false
     @Environment(\.dismiss) private var dismiss
     @Query private var preferences: [UserPreferenceRecord]
 
@@ -326,6 +341,7 @@ struct SettingsView: View {
         NavigationStack {
             if let preference = preferences.first {
                 SettingsForm(preference: preference, onDone: { dismiss() },
+                             focusTravelPreferences: focusTravelPreferences,
                              onResetNotInterested: onResetNotInterested)
             } else {
                 ContentUnavailableView("Settings unavailable", systemImage: "gearshape")
@@ -337,6 +353,7 @@ struct SettingsView: View {
 private struct SettingsForm: View {
     @Bindable var preference: UserPreferenceRecord
     let onDone: () -> Void
+    let focusTravelPreferences: Bool
     let onResetNotInterested: () -> Void
     @Environment(\.modelContext) private var modelContext
     @Query private var ignoredPlaces: [IgnoredPlaceRecord]
@@ -345,6 +362,7 @@ private struct SettingsForm: View {
     #endif
 
     var body: some View {
+        ScrollViewReader { proxy in
         Form {
                 Section("Driving") {
                     Picker("Distance units", selection: $preference.distanceUnit) {
@@ -358,6 +376,7 @@ private struct SettingsForm: View {
                     }
                     LabeledContent("Travel mode", value: "Driving")
                 }
+                .id("travelPreferences")
                 Section("Discover") {
                     Toggle("Show local places first", isOn: $preference.localFirst)
                     Toggle("EV Journey", isOn: $preference.evJourney)
@@ -396,9 +415,13 @@ private struct SettingsForm: View {
         }
         .navigationTitle("Settings")
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done", action: onDone) } }
+        .onAppear {
+            if focusTravelPreferences { proxy.scrollTo("travelPreferences", anchor: .top) }
+        }
         #if DEBUG
         .task { requestMetrics = await MapRequestGate.shared.metrics() }
         #endif
+        }
     }
 }
 

@@ -3,6 +3,7 @@ import SwiftUI
 struct ActiveJourneyView: View {
     @Bindable var state: AppState
     let openMaps: () -> Void
+    let onComplete: () -> Bool
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dismiss) private var dismiss
     @State private var passenger = false
@@ -48,6 +49,13 @@ struct ActiveJourneyView: View {
                         .disabled(state.openedLegCount >= journey.legs.count)
                         Text("Apple Maps handles directions one leg at a time. Return here to continue.")
                             .font(.caption).foregroundStyle(.secondary)
+                        Button("Complete journey", systemImage: "checkmark.circle") {
+                            if onComplete() {
+                                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                                dismiss()
+                            }
+                        }
+                        .font(.subheadline.weight(.semibold))
                         if passenger {
                             VStack(alignment: .leading, spacing: 12) {
                                 Text("Verified opportunities").font(.headline)
@@ -79,7 +87,7 @@ struct ActiveJourneyView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("End") { state.endActiveJourney(); dismiss() }
+                    Button("End active mode") { state.endActiveJourney(); dismiss() }
                 }
             }
         }

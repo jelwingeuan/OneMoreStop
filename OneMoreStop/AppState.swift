@@ -57,6 +57,9 @@ final class AppState {
     var activeMessage: String?
     var lastActiveDiscoveryAt: Date?
     var lastActiveReminderID: String?
+    var completedRouteID: UUID?
+    var completionMoment = false
+    private var deadlineOriginalAllowance: TimeInterval = 0
 
     var selectedStops: [Place] { journey?.stops ?? [] }
     var canAddStop: Bool { selectedStops.count < DiscoveryTuning.maxStops }
@@ -89,6 +92,24 @@ final class AppState {
     }
     var drivingArrival: Date? { journey.map { clockNow.addingTimeInterval($0.drivingDuration) } }
     var plannedArrival: Date? { drivingArrival?.addingTimeInterval(plannedVisitSeconds) }
+    var profileOriginalAllowance: TimeInterval {
+        switch timeBudget {
+        case .spare(let minutes): Double(minutes * 60)
+        case .arriveBy: deadlineOriginalAllowance
+        }
+    }
+    func profileRemainingTime(at now: Date) -> TimeInterval {
+        timeBudget.remaining(baseline: route?.baseline.duration ?? 0,
+                             journey: journey?.drivingDuration ?? route?.baseline.duration ?? 0,
+                             plannedVisits: plannedVisitSeconds, now: now)
+    }
+    var profileAvatarState: ProfileAvatarState {
+        ProfileAvatarState.resolve(hasRoute: route != nil,
+                                   discovering: phase == .discoveringPlaces || phase == .calculatingDetours,
+                                   hasStop: !selectedStops.isEmpty, active: activeJourney,
+                                   completed: completedRouteID == route?.id,
+                                   completionMoment: completionMoment)
+    }
     var surpriseChoice: StopRecommendation? {
         guard !recommendations.isEmpty else { return nil }
         return recommendations[surpriseIndex % recommendations.count]
@@ -150,6 +171,8 @@ final class AppState {
 
     func startActiveJourney() {
         guard route != nil, journey != nil else { return }
+        completedRouteID = nil
+        completionMoment = false
         activeJourney = true
         activeMessage = location.isAuthorized ? nil : "Location is off. Apple Maps directions still work; live progress needs location access."
         lastActiveDiscoveryAt = nil
@@ -161,6 +184,18 @@ final class AppState {
         activeMessage = nil
         lastActiveDiscoveryAt = nil
         lastActiveReminderID = nil
+    }
+
+    func completeActiveJourney() {
+        guard activeJourney, let route else { return }
+        endActiveJourney()
+        completedRouteID = route.id
+        completionMoment = true
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1.2))
+            guard let self, self.completedRouteID == route.id else { return }
+            self.completionMoment = false
+        }
     }
 
     func setOrigin(_ place: Place) {
@@ -218,6 +253,9 @@ final class AppState {
                                      baseline: baseline, createdAt: .now, options: options)
                 route = plan
                 selectedRouteIndex = 0
+                if case .arriveBy = timeBudget {
+                    deadlineOriginalAllowance = allowedExtraDriving
+                }
                 journey = Journey(stops: [], legs: [baseline], baseline: baseline)
                 travelerProgress = 0
                 if !cameraWasMovedByUser { fitCamera(to: baseline.path) }
@@ -245,6 +283,7 @@ final class AppState {
     func selectDeadline(_ deadline: Date) {
         guard !journeyBusy, deadline > clockNow else { return }
         timeBudget = .arriveBy(deadline)
+        deadlineOriginalAllowance = allowedExtraDriving
         discover()
     }
 
@@ -281,6 +320,7 @@ final class AppState {
         let selected = route.options[index]
         self.route = RoutePlan(id: UUID(), origin: route.origin, destination: route.destination,
                                baseline: selected, createdAt: .now, options: route.options)
+        if case .arriveBy = timeBudget { deadlineOriginalAllowance = allowedExtraDriving }
         selectedRouteIndex = index
         journey = Journey(stops: [], legs: [selected], baseline: selected)
         travelerProgress = 0

@@ -1,23 +1,27 @@
 import MapKit
 import SwiftData
 import SwiftUI
+import UIKit
 
 struct HomeView: View {
     @State private var state = AppState()
     @State private var tab = 0
+    @State private var savedFocus: SavedSection?
     @State private var showIntro = false
     @AppStorage("pendingJourneyAction") private var pendingJourneyAction = ""
     @Environment(\.modelContext) private var modelContext
     @Query private var preferences: [UserPreferenceRecord]
     @Query private var ignoredPlaces: [IgnoredPlaceRecord]
+    @Query private var profiles: [UserProfileRecord]
 
     var body: some View {
         TabView(selection: $tab) {
             ExploreView(state: state, tab: $tab,
-                        distanceUnit: preferences.first?.distanceUnit ?? "automatic")
+                        distanceUnit: preferences.first?.distanceUnit ?? "automatic",
+                        savedFocus: $savedFocus)
                 .tabItem { Label("Explore", systemImage: "map.fill") }
                 .tag(0)
-            SavedView { place in
+            SavedView(focusSection: $savedFocus) { place in
                 state.setDestination(place)
                 tab = 0
             } onRepeat: { journey in
@@ -50,6 +54,10 @@ struct HomeView: View {
                     appearance: defaults.string(forKey: "appearance") ?? "system",
                     hasSeenIntroduction: defaults.bool(forKey: "hasSeenIntroduction"))
                 modelContext.insert(preference)
+            }
+            if profiles.isEmpty {
+                modelContext.insert(UserProfileRecord())
+                try? modelContext.save()
             }
             state.budgetMinutes = preference.defaultBudgetMinutes
             state.defaultBudgetMinutes = preference.defaultBudgetMinutes
@@ -87,6 +95,10 @@ struct HomeView: View {
     }
 }
 
+private enum ProfileAction {
+    case saved(SavedSection), settings(Bool), repeatJourney(RecentJourney), viewJourney
+}
+
 private struct ExploreView: View {
     @Bindable var state: AppState
     @Binding var tab: Int
@@ -95,6 +107,12 @@ private struct ExploreView: View {
     @State private var detail: StopRecommendation?
     @State private var showJourney = false
     @State private var showSettings = false
+    @State private var showProfile = false
+    @State private var profileStartsInEditor = false
+    @State private var pendingProfileAction: ProfileAction?
+    @State private var settingsFocusTravel = false
+    @State private var recordingSession = JourneyRecordSession()
+    @State private var journeySaveFailed = false
     @State private var showSummary = false
     @State private var showSpontaneous = false
     @State private var showGroup = false
@@ -108,6 +126,9 @@ private struct ExploreView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
     @Query private var preferences: [UserPreferenceRecord]
+    @Query private var profiles: [UserProfileRecord]
+    @Query(sort: \RecentJourney.createdAt, order: .reverse) private var recentJourneys: [RecentJourney]
+    @Binding var savedFocus: SavedSection?
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -158,17 +179,22 @@ private struct ExploreView: View {
             }
         }
         .sheet(isPresented: $showSettings, onDismiss: { if state.route != nil && tab == 0 { showJourney = true } }) {
-            SettingsView(onResetNotInterested: { state.clearNotInterested() })
+            SettingsView(onResetNotInterested: { state.clearNotInterested() },
+                         focusTravelPreferences: settingsFocusTravel)
+        }
+        .sheet(isPresented: $showProfile, onDismiss: finishProfilePresentation) {
+            if let profile = profiles.first {
+                ProfileHubView(profile: profile, state: state, startInEditor: profileStartsInEditor,
+                               onSaved: { queueProfileAction(.saved($0)) },
+                               onSettings: { queueProfileAction(.settings($0)) },
+                               onRepeat: { queueProfileAction(.repeatJourney($0)) },
+                               onViewJourney: { queueProfileAction(.viewJourney) })
+            }
         }
         .sheet(isPresented: $showSummary) {
             if let route = state.route, let journey = state.journey {
                 JourneySummaryView(route: route, journey: journey, budget: state.budgetMinutes) { save in
-                    modelContext.insert(RecentJourney(origin: route.origin, destination: route.destination,
-                                                      stops: journey.stops, budgetMinutes: state.budgetMinutes,
-                                                      drivingDuration: journey.drivingDuration,
-                                                      extraDuration: journey.extraDuration, saved: save,
-                                                      plannedVisits: state.plannedVisitMinutes))
-                    showSummary = false
+                    if recordJourney(route: route, journey: journey, saved: save) { showSummary = false }
                 }
             }
         }
@@ -194,12 +220,16 @@ private struct ExploreView: View {
             }
         }
         .sheet(isPresented: $showActive) {
-            ActiveJourneyView(state: state, openMaps: { handoffFailed = !state.openNextLeg() })
+            ActiveJourneyView(state: state, openMaps: { handoffFailed = !state.openNextLeg() },
+                              onComplete: completeJourney)
         }
         .sheet(isPresented: $showJourney) { journeySheet }
         .alert("Couldn’t open Apple Maps", isPresented: $handoffFailed) {
             Button("OK", role: .cancel) {}
         } message: { Text("Try again in a moment.") }
+        .alert("Couldn’t save journey", isPresented: $journeySaveFailed) {
+            Button("OK", role: .cancel) {}
+        } message: { Text("Try completing the journey again.") }
         .onChange(of: state.route?.id) { _, routeID in
             showJourney = routeID != nil && tab == 0
         }
@@ -290,10 +320,7 @@ private struct ExploreView: View {
                 Image(systemName: "location.circle").font(.title3).frame(width: 30, height: 30)
             }
             .accessibilityLabel("Choose starting place")
-            Button { showJourney = false; showSettings = true } label: {
-                Image(systemName: "gearshape").font(.title3).frame(width: 30, height: 30)
-            }
-            .accessibilityLabel("Settings")
+            profileControl
             if FeatureFlags.groupMode {
                 Button { showJourney = false; showGroup = true } label: {
                     Image(systemName: "person.2.fill").font(.title3).frame(width: 30, height: 30)
@@ -306,6 +333,124 @@ private struct ExploreView: View {
             .accessibilityLabel("Saved")
         }
         .floatingControl()
+    }
+
+    private var profileControl: some View {
+        TimelineView(.periodic(from: .now, by: 60)) { context in
+            let avatarState = state.profileAvatarState
+            let remaining = state.profileRemainingTime(at: context.date)
+            Button { presentProfile() } label: {
+                ProfileAvatarView(profile: profiles.first, state: avatarState,
+                                  remaining: remaining, original: state.profileOriginalAllowance,
+                                  badgeSymbol: profileBadge(for: avatarState))
+            }
+            .buttonStyle(ProfilePressStyle(reduceMotion: reduceMotion))
+            .accessibilityLabel(profileAccessibilityLabel(remaining: remaining, state: avatarState))
+            .contextMenu {
+                Button("Edit profile", systemImage: "person.crop.circle") { presentProfile(edit: true) }
+                Button("Saved places", systemImage: "bookmark") { queueProfileAction(.saved(.places)) }
+                Button("Recent journeys", systemImage: "clock.arrow.circlepath") { queueProfileAction(.saved(.journeys)) }
+                Button("Collections", systemImage: "square.stack") { queueProfileAction(.saved(.collections)) }
+                if state.route != nil {
+                    Button("View journey", systemImage: "point.topleft.down.curvedto.point.bottomright.up") {
+                        queueProfileAction(.viewJourney)
+                    }
+                }
+                if let latest = recentJourneys.first {
+                    Button("Repeat journey", systemImage: "arrow.clockwise") {
+                        queueProfileAction(.repeatJourney(latest))
+                    }
+                }
+                Button("Travel preferences", systemImage: "slider.horizontal.3") { queueProfileAction(.settings(true)) }
+                Button("Settings", systemImage: "gearshape") { queueProfileAction(.settings(false)) }
+            }
+        }
+    }
+
+    private func profileBadge(for avatarState: ProfileAvatarState) -> String? {
+        switch avatarState {
+        case .idle: nil
+        case .planning, .journeyActive: "map.fill"
+        case .discovering: state.mode.symbol
+        case .stopSelected: state.selectedStops.last?.category?.symbol ?? "mappin"
+        case .journeyCompleted: "checkmark"
+        }
+    }
+
+    private func profileAccessibilityLabel(remaining: TimeInterval, state avatarState: ProfileAvatarState) -> String {
+        let name = profiles.first.flatMap { $0.displayName.isEmpty ? nil : $0.displayName } ?? "your profile"
+        guard avatarState != .idle else { return "Profile, \(name)" }
+        let activity: String
+        switch avatarState {
+        case .discovering: activity = "Finding \(state.mode.title.lowercased()) stops."
+        case .journeyActive: activity = "Journey active."
+        case .stopSelected: activity = "Stop selected."
+        case .journeyCompleted: activity = "Journey completed."
+        case .planning: activity = "Planning journey."
+        case .idle: activity = ""
+        }
+        return "Profile, \(name). \(TripFormatting.duration(remaining)) Adventure Time remaining. \(activity)"
+    }
+
+    private func presentProfile(edit: Bool = false) {
+        showJourney = false
+        profileStartsInEditor = edit
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        showProfile = true
+    }
+
+    private func queueProfileAction(_ action: ProfileAction) {
+        if showProfile {
+            pendingProfileAction = action
+            showProfile = false
+        } else { performProfileAction(action) }
+    }
+
+    private func finishProfilePresentation() {
+        if let action = pendingProfileAction {
+            pendingProfileAction = nil
+            performProfileAction(action)
+        } else if state.route != nil && tab == 0 {
+            showJourney = true
+        }
+    }
+
+    private func performProfileAction(_ action: ProfileAction) {
+        switch action {
+        case .saved(let section):
+            savedFocus = section
+            tab = 1
+        case .settings(let travel):
+            showJourney = false
+            settingsFocusTravel = travel
+            showSettings = true
+        case .repeatJourney(let journey):
+            tab = 0
+            Task { await state.repeatJourney(journey) }
+        case .viewJourney:
+            if state.activeJourney { showActive = true }
+            else { showJourney = true }
+        }
+    }
+
+    private func recordJourney(route: RoutePlan, journey: Journey, saved: Bool) -> Bool {
+        do {
+            _ = try recordingSession.record(route: route, journey: journey,
+                                            budgetMinutes: state.budgetMinutes,
+                                            plannedVisits: state.plannedVisitMinutes,
+                                            saved: saved, in: modelContext)
+            return true
+        } catch {
+            journeySaveFailed = true
+            return false
+        }
+    }
+
+    private func completeJourney() -> Bool {
+        guard state.activeJourney, let route = state.route, let journey = state.journey,
+              recordJourney(route: route, journey: journey, saved: false) else { return false }
+        state.completeActiveJourney()
+        return true
     }
 
     private var destinationPill: some View {

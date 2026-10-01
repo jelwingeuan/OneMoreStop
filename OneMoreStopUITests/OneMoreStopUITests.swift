@@ -7,11 +7,75 @@ final class OneMoreStopUITests: XCTestCase {
         app.launchArguments += ["-hasSeenIntroduction", "YES"]
         app.launch()
         XCTAssertTrue(app.staticTexts["A little time. A better drive."].waitForExistence(timeout: 15))
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Profile,")).firstMatch.tap()
+        XCTAssertTrue(app.navigationBars["Profile"].waitForExistence(timeout: 5))
         app.buttons["Settings"].tap()
         XCTAssertTrue(app.staticTexts["Driving"].waitForExistence(timeout: 5))
         app.buttons["Done"].tap()
         app.buttons["Saved"].firstMatch.tap()
         XCTAssertTrue(app.staticTexts["Collections"].waitForExistence(timeout: 5))
+    }
+
+    func testProfileEditAndSavedShortcuts() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-hasSeenIntroduction", "YES"]
+        app.launch()
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Profile,")).firstMatch.tap()
+        app.buttons["Edit profile"].tap()
+        XCTAssertTrue(app.navigationBars["Edit profile"].waitForExistence(timeout: 5))
+        let name = app.textFields["Display name"]
+        name.tap()
+        name.typeText(" Nur")
+        let savedName = try XCTUnwrap(name.value as? String)
+        app.buttons["Save"].tap()
+        XCTAssertTrue(app.staticTexts[savedName].waitForExistence(timeout: 5))
+        app.buttons["Collections"].tap()
+        XCTAssertTrue(app.navigationBars["Saved"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["New collection"].exists)
+    }
+
+    func testAvatarLongPressKeepsQuickActionsAccessible() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-hasSeenIntroduction", "YES"]
+        app.launch()
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Profile,")).firstMatch
+            .press(forDuration: 0.8)
+        XCTAssertTrue(app.buttons["Travel preferences"].waitForExistence(timeout: 5))
+        app.buttons["Travel preferences"].tap()
+        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Driving"].exists)
+    }
+
+    func testProfilePhotoCanBeChosenReplacedAndRemoved() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-hasSeenIntroduction", "YES"]
+        app.launch()
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Profile,")).firstMatch.tap()
+        app.buttons["Edit profile"].tap()
+        let firstAction = app.buttons["Choose photo"].exists ? "Choose photo" : "Replace photo"
+        app.buttons[firstAction].tap()
+        try requireAvailablePhotoPicker(in: app)
+        let photoCells = app.collectionViews.cells
+        let firstPhoto = photoCells.element(boundBy: max(0, photoCells.count - 1))
+        XCTAssertTrue(firstPhoto.waitForExistence(timeout: 10))
+        firstPhoto.tap()
+        XCTAssertTrue(app.buttons["Replace photo"].waitForExistence(timeout: 20))
+        app.buttons["Replace photo"].tap()
+        try requireAvailablePhotoPicker(in: app)
+        XCTAssertTrue(firstPhoto.waitForExistence(timeout: 10))
+        firstPhoto.tap()
+        XCTAssertTrue(app.buttons["Remove photo"].waitForExistence(timeout: 20))
+        app.buttons["Remove photo"].tap()
+        XCTAssertTrue(app.buttons["Choose photo"].waitForExistence(timeout: 10))
+    }
+
+    private func requireAvailablePhotoPicker(in app: XCUIApplication) throws {
+        let unavailable = app.navigationBars["PUPickerUnavailableView"]
+        guard unavailable.exists else { return }
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: unavailable)
+        if XCTWaiter.wait(for: [ready], timeout: 15) != .completed {
+            throw XCTSkip("The simulator’s system PhotosPicker stayed on its unavailable loading screen.")
+        }
     }
 
     func testMalaysiaRouteCanBeSearched() throws {
@@ -35,6 +99,11 @@ final class OneMoreStopUITests: XCTestCase {
             openMaps.tap()
             app.activate()
             XCTAssertTrue(app.buttons["Continue to next stop"].waitForExistence(timeout: 20))
+            app.buttons["Start active journey"].tap()
+            XCTAssertTrue(app.navigationBars["Active journey"].waitForExistence(timeout: 10))
+            app.buttons["Complete journey"].tap()
+            XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Profile,")).firstMatch
+                .waitForExistence(timeout: 10))
         }
         let screenshot = XCTAttachment(screenshot: app.screenshot())
         screenshot.lifetime = .keepAlways

@@ -118,6 +118,25 @@ enum FeatureFlags {
     static let spontaneousJourneys = true
     static let searchDensity = true
     static let alternateRouteComparison = true
+    static let opportunityRadar = true
+    static let oneMoreStopButton = true
+    static let timeMachineSlider = true
+    static let stopAutopilot = true
+    static let missionMode = true
+    static let journeyRhythm = true
+    static let saveForReturn = true
+    static let whatWasThat = true
+    static let detourRoulette = true
+    static let journeyChains = true
+    static let passengerControl = true
+    static let meetOnTheWay = true
+    static let rendezvousMode = true
+    static let journeyChapters = true
+    static let interestingOnlyMode = true
+    static let opportunityScoreV2 = true
+    static let liveActivityOpportunity = true
+    static let appIntentShortcuts = true
+    static let carPlayPreparation = false
 }
 
 enum DesignValues {

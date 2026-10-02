@@ -8,32 +8,32 @@ struct HomeView: View {
     @State private var tab = 0
     @State private var savedFocus: SavedSection?
     @State private var showIntro = false
+    @State private var exploreIntent = ""
     @AppStorage("pendingJourneyAction") private var pendingJourneyAction = ""
     @Environment(\.modelContext) private var modelContext
     @Query private var preferences: [UserPreferenceRecord]
     @Query private var ignoredPlaces: [IgnoredPlaceRecord]
     @Query private var profiles: [UserProfileRecord]
+    @Query private var returnRecords: [ReturnOpportunityRecord]
+    @Query private var recentPlaces: [RecentPlace]
+    @Query(sort: \RecentJourney.createdAt, order: .reverse) private var recentForIntents: [RecentJourney]
 
     var body: some View {
+        dataObservedView
+    }
+
+    private var tabs: some View {
         TabView(selection: $tab) {
-            ExploreView(state: state, tab: $tab,
-                        distanceUnit: preferences.first?.distanceUnit ?? "automatic",
-                        savedFocus: $savedFocus)
-                .tabItem { Label("Explore", systemImage: "map.fill") }
-                .tag(0)
-            SavedView(focusSection: $savedFocus) { place in
-                state.setDestination(place)
-                tab = 0
-            } onRepeat: { journey in
-                tab = 0
-                Task { await state.repeatJourney(journey) }
-            }
-            .tabItem { Label("Saved", systemImage: "bookmark.fill") }
-            .tag(1)
+            exploreTab
+            savedTab
         }
         .tint(.orange)
         .preferredColorScheme(preferences.first?.appearance == "light" ? .light :
                               preferences.first?.appearance == "dark" ? .dark : nil)
+    }
+
+    private var setupView: some View {
+        tabs
         .sheet(isPresented: $showIntro) {
             IntroductionView {
                 preferences.first?.hasSeenIntroduction = true
@@ -41,34 +41,11 @@ struct HomeView: View {
             }
             .presentationDetents([.medium])
         }
-        .task {
-            let preference: UserPreferenceRecord
-            if let existing = preferences.first { preference = existing }
-            else {
-                let defaults = UserDefaults.standard
-                preference = UserPreferenceRecord(
-                    distanceUnit: defaults.string(forKey: "distanceUnit") ?? "automatic",
-                    defaultBudgetMinutes: defaults.object(forKey: "defaultBudget") as? Int ?? 20,
-                    localFirst: defaults.bool(forKey: "localFirst"),
-                    evJourney: defaults.bool(forKey: "evJourney"),
-                    appearance: defaults.string(forKey: "appearance") ?? "system",
-                    hasSeenIntroduction: defaults.bool(forKey: "hasSeenIntroduction"))
-                modelContext.insert(preference)
-            }
-            if profiles.isEmpty {
-                modelContext.insert(UserProfileRecord())
-                try? modelContext.save()
-            }
-            state.budgetMinutes = preference.defaultBudgetMinutes
-            state.defaultBudgetMinutes = preference.defaultBudgetMinutes
-            state.localFirst = preference.localFirst
-            state.evJourney = preference.evJourney
-            state.preferenceCounts = preference.selectedCategoryCounts
-            state.ignoredPlaceIDs = Set(ignoredPlaces.map(\.id))
-            await state.useCurrentLocationIfAuthorized()
-            showIntro = !preference.hasSeenIntroduction
-            handleIntentNavigation()
-        }
+        .task { await loadInitialState() }
+    }
+
+    private var preferenceObservedView: some View {
+        setupView
         .onChange(of: pendingJourneyAction) { _, _ in handleIntentNavigation() }
         .onChange(of: preferences.first?.localFirst) { _, value in state.localFirst = value ?? false; state.discover() }
         .onChange(of: preferences.first?.evJourney) { _, value in state.evJourney = value ?? false; state.discover() }
@@ -77,10 +54,77 @@ struct HomeView: View {
             state.preferenceCounts = preferences.first?.selectedCategoryCounts ?? [:]
             state.discover()
         }
+        .onChange(of: state.autopilotRules) { _, value in preferences.first?.autopilotRules = value }
+        .onChange(of: state.interestingOnly) { _, value in preferences.first?.interestingOnlyDefault = value }
+        .onChange(of: state.mode) { _, value in preferences.first?.recordMode(value) }
+    }
+
+    private var dataObservedView: some View {
+        preferenceObservedView
         .onChange(of: ignoredPlaces.map(\.id)) { _, values in
             state.ignoredPlaceIDs = Set(values)
             state.discover()
         }
+        .onChange(of: returnRecords.map(\.savedAt)) { _, _ in
+            state.returnOpportunities = returnRecords.compactMap(\.snapshot)
+            state.discover()
+        }
+        .onChange(of: recentPlaces.map(\.id)) { _, _ in
+            state.previouslySelectedPlaceIDs = Set(recentPlaces.filter { $0.kind == "stop" }.map { $0.place.id })
+        }
+    }
+
+    private func loadInitialState() async {
+        let preference: UserPreferenceRecord
+        if let existing = preferences.first { preference = existing }
+        else {
+            let defaults = UserDefaults.standard
+            preference = UserPreferenceRecord(
+                distanceUnit: defaults.string(forKey: "distanceUnit") ?? "automatic",
+                defaultBudgetMinutes: defaults.object(forKey: "defaultBudget") as? Int ?? 20,
+                localFirst: defaults.bool(forKey: "localFirst"),
+                evJourney: defaults.bool(forKey: "evJourney"),
+                appearance: defaults.string(forKey: "appearance") ?? "system",
+                hasSeenIntroduction: defaults.bool(forKey: "hasSeenIntroduction"))
+            modelContext.insert(preference)
+        }
+        if profiles.isEmpty {
+            modelContext.insert(UserProfileRecord())
+            try? modelContext.save()
+        }
+        state.budgetMinutes = preference.defaultBudgetMinutes
+        state.defaultBudgetMinutes = preference.defaultBudgetMinutes
+        state.localFirst = preference.localFirst
+        state.evJourney = preference.evJourney
+        state.preferenceCounts = preference.selectedCategoryCounts
+        state.autopilotRules = preference.autopilotRules ?? state.autopilotRules
+        state.interestingOnly = preference.interestingOnlyDefault ?? false
+        state.ignoredPlaceIDs = Set(ignoredPlaces.map(\.id))
+        state.returnOpportunities = returnRecords.compactMap(\.snapshot)
+        state.previouslySelectedPlaceIDs = Set(recentPlaces.filter { $0.kind == "stop" }.map { $0.place.id })
+        await state.useCurrentLocationIfAuthorized()
+        showIntro = !preference.hasSeenIntroduction
+        handleIntentNavigation()
+    }
+
+    private var exploreTab: some View {
+        ExploreView(state: state, tab: $tab,
+                    distanceUnit: preferences.first?.distanceUnit ?? "automatic",
+                    savedFocus: $savedFocus, exploreIntent: $exploreIntent)
+            .tabItem { Label("Explore", systemImage: "map.fill") }
+            .tag(0)
+    }
+
+    private var savedTab: some View {
+        SavedView(focusSection: $savedFocus) { place in
+            state.setDestination(place)
+            tab = 0
+        } onRepeat: { journey in
+            tab = 0
+            Task { await state.repeatJourney(journey) }
+        }
+        .tabItem { Label("Saved", systemImage: "bookmark.fill") }
+        .tag(1)
     }
 
     private func handleIntentNavigation() {
@@ -88,9 +132,43 @@ struct HomeView: View {
         let action = pendingJourneyAction
         pendingJourneyAction = ""
         if action == "saved" { tab = 1 }
-        else if let mode = DiscoveryMode(rawValue: action) {
+        else if action == "repeatRecent" {
+            tab = 0
+            if let recent = recentForIntents.first { Task { await state.repeatJourney(recent) } }
+            else { state.locationMessage = "No recent journey is saved yet. Plan a route first." }
+        } else if action == "coffee10" {
+            tab = 0
+            state.selectBudget(10)
+            state.selectMode(.coffee)
+            exploreIntent = "showJourney"
+        } else if action == "oneMoreStop" {
+            tab = 0
+            if state.route != nil { state.showOneMoreStop(); exploreIntent = "showJourney" }
+            else { state.locationMessage = "Choose a destination to find one more stop." }
+        } else if action == "skipOpportunity" {
+            tab = 0
+            if state.nextOpportunity != nil { state.skipOpportunity(); exploreIntent = "showActive" }
+            else { state.locationMessage = "No current opportunity to skip. Start a journey first." }
+        } else if action == "saveOpportunity" {
+            tab = 0
+            if let opportunity = state.nextOpportunity, let route = state.route {
+                if let record = returnRecords.first(where: { $0.id == opportunity.id }) {
+                    record.update(opportunity: opportunity, route: route)
+                } else { modelContext.insert(ReturnOpportunityRecord(opportunity: opportunity, route: route)) }
+                state.noteSavedForReturn(id: opportunity.id)
+                state.markOpportunitySaved(opportunity.id)
+                exploreIntent = "showActive"
+            } else { state.locationMessage = "No current opportunity to save. Start a journey first." }
+        } else if action == "nextOpportunity" {
+            tab = 0
+            exploreIntent = state.activeJourney ? "showActive" : "showJourney"
+        } else if action == "escape" {
+            tab = 0
+            exploreIntent = "escape"
+        } else if let mode = DiscoveryMode(rawValue: action) {
             tab = 0
             state.selectMode(mode)
+            exploreIntent = "showJourney"
         }
     }
 }
@@ -118,6 +196,8 @@ private struct ExploreView: View {
     @State private var showGroup = false
     @State private var reopenJourneyAfterGroup = false
     @State private var showActive = false
+    @State private var showRecap = false
+    @State private var pendingRecap = false
     @State private var spontaneousInitialKind: SpontaneousKind = .driveUntil
     @State private var handoffFailed = false
     @State private var replacingIndex: Int?
@@ -127,8 +207,10 @@ private struct ExploreView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Query private var preferences: [UserPreferenceRecord]
     @Query private var profiles: [UserProfileRecord]
+    @Query private var returnRecords: [ReturnOpportunityRecord]
     @Query(sort: \RecentJourney.createdAt, order: .reverse) private var recentJourneys: [RecentJourney]
     @Binding var savedFocus: SavedSection?
+    @Binding var exploreIntent: String
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -179,7 +261,7 @@ private struct ExploreView: View {
             }
         }
         .sheet(isPresented: $showSettings, onDismiss: { if state.route != nil && tab == 0 { showJourney = true } }) {
-            SettingsView(onResetNotInterested: { state.clearNotInterested() },
+            SettingsView(state: state, onResetNotInterested: { state.clearNotInterested() },
                          focusTravelPreferences: settingsFocusTravel)
         }
         .sheet(isPresented: $showProfile, onDismiss: finishProfilePresentation) {
@@ -219,9 +301,35 @@ private struct ExploreView: View {
                 showGroup = false
             }
         }
-        .sheet(isPresented: $showActive) {
+        .sheet(isPresented: $showActive, onDismiss: {
+            if pendingRecap { pendingRecap = false; showRecap = true }
+        }) {
             ActiveJourneyView(state: state, openMaps: { handoffFailed = !state.openNextLeg() },
-                              onComplete: completeJourney)
+                              onComplete: completeJourney,
+                              onAddOpportunity: { recommendation in
+                                  if state.addStop(recommendation) {
+                                      modelContext.insert(RecentPlace(recommendation.place, kind: "stop"))
+                                      preferences.first?.recordSelection(recommendation.place.category)
+                                  }
+                              }, onAddChain: { chain in
+                                  if state.addCombination(chain) {
+                                      modelContext.insert(RecentPlace(chain.first, kind: "stop"))
+                                      modelContext.insert(RecentPlace(chain.second, kind: "stop"))
+                                      preferences.first?.recordSelection(chain.first.category)
+                                      preferences.first?.recordSelection(chain.second.category)
+                                  }
+                              }, onSaveOpportunity: { opportunity in
+                                  if let route = state.route {
+                                      if let record = returnRecords.first(where: { $0.id == opportunity.id }) {
+                                          record.update(opportunity: opportunity, route: route)
+                                      } else { modelContext.insert(ReturnOpportunityRecord(opportunity: opportunity, route: route)) }
+                                      state.noteSavedForReturn(id: opportunity.id)
+                                      state.markOpportunitySaved(opportunity.id)
+                                  }
+                              })
+        }
+        .sheet(isPresented: $showRecap) {
+            if let recap = state.lastRecap { JourneyRecapView(recap: recap) }
         }
         .sheet(isPresented: $showJourney) { journeySheet }
         .alert("Couldn’t open Apple Maps", isPresented: $handoffFailed) {
@@ -239,6 +347,7 @@ private struct ExploreView: View {
         }
         .onChange(of: state.focusedRecommendationID) { _, id in
             guard let id, let recommendation = state.recommendations.first(where: { $0.id == id }) else { return }
+            state.noteViewed(recommendation)
             withAnimation(reduceMotion ? nil : .smooth(duration: 0.3)) {
                 state.camera = .region(MKCoordinateRegion(center: recommendation.place.coordinate.clLocation,
                                                           latitudinalMeters: 10_000, longitudinalMeters: 10_000))
@@ -246,6 +355,16 @@ private struct ExploreView: View {
         }
         .onChange(of: scenePhase) { _, value in
             if value == .active { Task { await state.refreshTravelerProgress() } }
+        }
+        .onChange(of: exploreIntent) { _, value in
+            guard !value.isEmpty else { return }
+            exploreIntent = ""
+            switch value {
+            case "showActive": if state.activeJourney { showActive = true } else { showJourney = state.route != nil }
+            case "showJourney": showJourney = state.route != nil
+            case "escape": spontaneousInitialKind = .escape; showSpontaneous = true
+            default: break
+            }
         }
     }
 
@@ -276,17 +395,18 @@ private struct ExploreView: View {
                     Marker("\(index + 1). \(stop.name)", systemImage: stop.category?.symbol ?? "mappin",
                            coordinate: stop.coordinate.clLocation).tint(.orange)
                 }
-                ForEach(state.recommendations) { recommendation in
+                ForEach(state.recommendations.prefix(4)) { recommendation in
                     Annotation(recommendation.place.name, coordinate: recommendation.place.coordinate.clLocation) {
                         Button { state.focusedRecommendationID = recommendation.id } label: {
                             Image(systemName: recommendation.place.category?.symbol ?? "mappin")
                                 .font(.body.weight(.semibold))
                                 .foregroundStyle(.white)
                                 .frame(width: 40, height: 40)
-                                .background(state.focusedRecommendationID == recommendation.id ? Color.orange : Color.indigo, in: Circle())
+                                .background(state.focusedRecommendationID == recommendation.id ||
+                                            state.nextOpportunity?.id == recommendation.id ? Color.orange : Color.indigo, in: Circle())
                                 .overlay(Circle().stroke(.white, lineWidth: 2))
                         }
-                        .accessibilityLabel("\(recommendation.place.name), \(TripFormatting.extraTime(recommendation.detourTime)) driving")
+                        .accessibilityLabel("\(recommendation.place.name), \(TripFormatting.extraTime(recommendation.incrementalDetourTime)) added driving")
                     }
                 }
             }
@@ -450,6 +570,7 @@ private struct ExploreView: View {
         guard state.activeJourney, let route = state.route, let journey = state.journey,
               recordJourney(route: route, journey: journey, saved: false) else { return false }
         state.completeActiveJourney()
+        pendingRecap = true
         return true
     }
 
@@ -552,6 +673,16 @@ private struct ExploreView: View {
                                      preferences.first?.recordSelection(combination.second.category)
                                  }
                              },
+                             onSaveForReturn: { recommendation in
+                                 guard let route = state.route else { return }
+                                 if let record = returnRecords.first(where: { $0.id == recommendation.id }) {
+                                     record.update(recommendation: recommendation, route: route)
+                                 } else {
+                                     modelContext.insert(ReturnOpportunityRecord(recommendation: recommendation, route: route))
+                                 }
+                                 state.noteSavedForReturn(id: recommendation.id)
+                                 state.markOpportunitySaved(recommendation.id)
+                             },
                              onReplace: { index in
                                  replacingIndex = index
                                  showJourney = false
@@ -577,6 +708,7 @@ private struct JourneySheetView: View {
     let onDetail: (StopRecommendation) -> Void
     let onAdd: (StopRecommendation) -> Void
     let onAddCombo: (StopCombination) -> Void
+    let onSaveForReturn: (StopRecommendation) -> Void
     let onReplace: (Int) -> Void
     let onMaps: () -> Void
     let onSummary: () -> Void
@@ -595,6 +727,13 @@ private struct JourneySheetView: View {
                 if let route = state.route, route.options.count > 1, state.selectedStops.isEmpty {
                     routeOptions(route)
                 }
+                if !state.routeOpportunitySummary.isEmpty {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("Places found in this searched corridor").font(.subheadline.weight(.semibold))
+                        Text(state.routeOpportunitySummary.map { "\($0.1) \($0.0.lowercased())" }.joined(separator: " · "))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
                 if FeatureFlags.searchDensity, let coverage = state.discoveryCoverage, coverage.successfulSearches > 0 {
                     Toggle("Show found-place density", isOn: $state.showDensity)
                         .font(.subheadline)
@@ -602,6 +741,13 @@ private struct JourneySheetView: View {
                         .font(.caption2).foregroundStyle(.secondary)
                 }
                 if !state.selectedStops.isEmpty { timeline.disabled(state.journeyBusy) }
+                if FeatureFlags.oneMoreStopButton { oneMoreStopControl }
+                if FeatureFlags.timeMachineSlider { timeMachineControl }
+                if FeatureFlags.missionMode { missionControl }
+                if FeatureFlags.interestingOnlyMode {
+                    Toggle("Tell me when it gets interesting", isOn: $state.interestingOnly)
+                        .onChange(of: state.interestingOnly) { _, _ in state.refreshOpportunityPolicy() }
+                }
                 budgetControls.disabled(state.journeyBusy)
                 modeControls.disabled(state.journeyBusy)
                 if FeatureFlags.journeyNeeds { needControls.disabled(state.journeyBusy) }
@@ -616,16 +762,17 @@ private struct JourneySheetView: View {
                 if let comparison = state.betterAhead { aheadComparison(comparison) }
                 if state.canAddStop && !state.journeyBusy { recommendations }
                 if !state.combinations.isEmpty && !state.journeyBusy { combinationCards }
-                if !state.selectedStops.isEmpty { journeyActions }
+                if state.route != nil { journeyActions }
             }
             .padding(.horizontal, 20)
             .padding(.top, 26)
             .padding(.bottom, 32)
         }
         .sensoryFeedback(.selection, trigger: state.budgetMinutes)
+        .sensoryFeedback(.selection, trigger: state.timeMachinePreview)
         .scrollIndicators(.hidden)
         .safeAreaInset(edge: .bottom) {
-            if !state.selectedStops.isEmpty {
+            if state.route != nil {
                 Button(action: onMaps) {
                     Label(state.openedLegCount == 0 ? "Open in Apple Maps" : "Continue to next stop",
                           systemImage: "arrow.triangle.turn.up.right.diamond.fill")
@@ -638,6 +785,86 @@ private struct JourneySheetView: View {
                 .padding(.vertical, 8)
                 .background(.regularMaterial)
             }
+        }
+    }
+
+    private var oneMoreStopControl: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button("One More Stop", systemImage: "sparkle.magnifyingglass") { state.showOneMoreStop() }
+                .buttonStyle(.borderedProminent).tint(.orange)
+                .disabled(!state.canAddStop || state.journeyBusy)
+            if state.oneMoreStopPresented {
+                if let opportunity = state.nextOpportunity {
+                    Text(opportunity.place.name).font(.headline)
+                    Text("\(TripFormatting.extraTime(opportunity.incrementalDriving)) added driving · \(opportunity.reasons.first ?? "Verified along your route")")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                    HStack {
+                        Button("Add stop") {
+                            if let item = state.recommendations.first(where: { $0.id == opportunity.id }) { onAdd(item) }
+                        }
+                        Button("Another") { state.showAnotherOpportunity() }
+                            .disabled(state.opportunities.count < 2)
+                        Button("Skip") { state.skipOpportunity() }
+                    }
+                    .font(.subheadline)
+                } else if state.phase == .loaded || state.phase == .noResults {
+                    Text("Keep driving. Nothing verified fits your time right now.")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var timeMachineControl: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Time Machine").font(.headline)
+            Text("Preview stops by extra driving time")
+                .font(.caption).foregroundStyle(.secondary)
+            ScrollView(.horizontal) {
+                HStack {
+                    ForEach(TimeMachine.buckets, id: \.self) { minutes in
+                        Button(minutes == 90 ? "60+" : "\(minutes)") { state.previewTimeMachine(minutes) }
+                            .buttonStyle(.bordered)
+                            .tint(state.timeMachinePreview == minutes ? .orange : .secondary)
+                    }
+                }
+            }
+            .scrollIndicators(.hidden)
+            if let preview = state.timeMachinePreview {
+                Text("\(state.timeMachinePreviewCount) verified stops in cache at \(preview) min")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("Use \(preview) min budget") { state.applyTimeMachine() }
+                    .buttonStyle(.borderedProminent).tint(.orange)
+                ForEach(state.timeMachinePreviewRecommendations) { item in
+                    HStack {
+                        Text(item.place.name).lineLimit(1)
+                        Spacer()
+                        Text(TripFormatting.extraTime(item.detourTime))
+                        Button("Save for Return") { onSaveForReturn(item) }
+                    }
+                    .font(.caption)
+                }
+                if state.timeBudget.deadline != nil {
+                    Text("Applying this changes your deadline to an extra-driving budget.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private var missionControl: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Mission").font(.headline)
+            Menu(state.selectedMission?.title ?? "Choose a mission") {
+                Button("No mission") { state.chooseMission(nil) }
+                ForEach(JourneyMission.allCases) { mission in
+                    Button(mission.title) { state.chooseMission(mission) }
+                }
+            }
+            .buttonStyle(.bordered)
+            Text("Missions use matching place types and routed driving costs.")
+                .font(.caption2).foregroundStyle(.secondary)
         }
     }
 
@@ -686,7 +913,13 @@ private struct JourneySheetView: View {
 
     private func routeOptions(_ route: RoutePlan) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Driving routes").font(.headline)
+            Text("Route Remix").font(.headline)
+            Picker("Find places for", selection: $state.remixMode) {
+                ForEach([DiscoveryMode.explore, .eat, .coffee, .scenic, .nature, .surpriseMe], id: \.self) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            .pickerStyle(.menu)
             ForEach(route.options.indices, id: \.self) { index in
                 let option = route.options[index]
                 Button {
@@ -1009,6 +1242,9 @@ private struct JourneySheetView: View {
                 Button("Add stop") { onAdd(recommendation) }
                     .buttonStyle(.borderedProminent).tint(.orange)
                 Menu {
+                    if FeatureFlags.saveForReturn {
+                        Button("Save for Return") { onSaveForReturn(recommendation) }
+                    }
                     Button("Not interested") { state.notInterested(recommendation.place) }
                     Button("Don't suggest this place again") {
                         state.ignore(recommendation.place)

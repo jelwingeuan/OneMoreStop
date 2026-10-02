@@ -11,6 +11,9 @@ final class UserPreferenceRecord {
     var appearance: String
     var hasSeenIntroduction: Bool
     var selectedCategoryCountsData: Data
+    var autopilotRulesData: Data?
+    var interestingOnlyDefault: Bool?
+    var selectedModeCountsData: Data?
 
     init(distanceUnit: String = "automatic", defaultBudgetMinutes: Int = 20,
          localFirst: Bool = false, evJourney: Bool = false, appearance: String = "system",
@@ -23,6 +26,9 @@ final class UserPreferenceRecord {
         self.appearance = appearance
         self.hasSeenIntroduction = hasSeenIntroduction
         selectedCategoryCountsData = Data()
+        autopilotRulesData = nil
+        interestingOnlyDefault = nil
+        selectedModeCountsData = nil
     }
 
     var selectedCategoryCounts: [String: Int] {
@@ -36,7 +42,25 @@ final class UserPreferenceRecord {
         selectedCategoryCountsData = (try? JSONEncoder().encode(counts)) ?? Data()
     }
 
-    func resetLearning() { selectedCategoryCountsData = Data() }
+    func resetLearning() {
+        selectedCategoryCountsData = Data()
+        selectedModeCountsData = nil
+    }
+
+    var autopilotRules: [JourneyRule]? {
+        get { autopilotRulesData.flatMap { try? JSONDecoder().decode([JourneyRule].self, from: $0) } }
+        set { autopilotRulesData = newValue.flatMap { try? JSONEncoder().encode($0) } }
+    }
+
+    var selectedModeCounts: [String: Int] {
+        (selectedModeCountsData.flatMap { try? JSONDecoder().decode([String: Int].self, from: $0) }) ?? [:]
+    }
+
+    func recordMode(_ mode: DiscoveryMode) {
+        var counts = selectedModeCounts
+        counts[mode.rawValue, default: 0] += 1
+        selectedModeCountsData = try? JSONEncoder().encode(counts)
+    }
 }
 
 @Model

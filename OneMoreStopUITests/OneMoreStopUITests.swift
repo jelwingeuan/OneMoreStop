@@ -102,12 +102,42 @@ final class OneMoreStopUITests: XCTestCase {
             app.buttons["Start active journey"].tap()
             XCTAssertTrue(app.navigationBars["Active journey"].waitForExistence(timeout: 10))
             app.buttons["Complete journey"].tap()
+            XCTAssertTrue(app.navigationBars["Journey recap"].waitForExistence(timeout: 10))
+            app.buttons["Done"].tap()
             XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Profile,")).firstMatch
                 .waitForExistence(timeout: 10))
         }
         let screenshot = XCTAttachment(screenshot: app.screenshot())
         screenshot.lifetime = .keepAlways
         add(screenshot)
+    }
+
+    func testV4JourneyControlsAndPassengerSurface() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-hasSeenIntroduction", "YES"]
+        app.launch()
+        try choose("Cyberjaya", from: app.buttons["Choose starting place"].firstMatch, in: app)
+        try choose("Melaka", from: app.buttons["Where are you going?"].firstMatch, in: app)
+        guard app.staticTexts["Find your one more stop"].waitForExistence(timeout: 60) else {
+            throw XCTSkip("MapKit route was unavailable in this simulator run.")
+        }
+        XCTAssertTrue(app.buttons["One More Stop"].exists)
+        XCTAssertTrue(app.staticTexts["Time Machine"].exists)
+        XCTAssertTrue(app.staticTexts["Mission"].exists)
+        app.buttons["One More Stop"].tap()
+        app.buttons["15"].firstMatch.tap()
+        XCTAssertTrue(app.buttons["Use 15 min budget"].exists)
+        app.buttons["Use 15 min budget"].tap()
+        let start = app.buttons["Start active journey"]
+        if !start.isHittable { app.scrollViews.firstMatch.swipeUp() }
+        XCTAssertTrue(start.waitForExistence(timeout: 10))
+        start.tap()
+        XCTAssertTrue(app.navigationBars["Active journey"].waitForExistence(timeout: 10))
+        app.segmentedControls.buttons["Passenger"].tap()
+        XCTAssertTrue(app.staticTexts["Upcoming opportunities"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["What Was That?"].exists)
+        XCTAssertTrue(app.staticTexts["Detour Roulette"].exists)
+        XCTAssertTrue(app.buttons["Meet on the way"].exists)
     }
 
     func testRouteOutsideMalaysia() throws {

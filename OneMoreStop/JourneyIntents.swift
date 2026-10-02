@@ -56,3 +56,87 @@ struct OpenSavedJourneysIntent: AppIntent {
         return .result()
     }
 }
+
+struct FindOneMoreStopIntent: AppIntent {
+    static let title: LocalizedStringResource = "Find One More Stop"
+    static let description = IntentDescription("Open one verified opportunity on your planned route.")
+    static let openAppWhenRun = true
+    func perform() async throws -> some IntentResult {
+        IntentNavigation.request("oneMoreStop")
+        return .result()
+    }
+}
+
+struct CoffeeUnderTenIntent: AppIntent {
+    static let title: LocalizedStringResource = "Coffee under 10 minutes"
+    static let openAppWhenRun = true
+    func perform() async throws -> some IntentResult {
+        IntentNavigation.request("coffee10")
+        return .result()
+    }
+}
+
+struct SurpriseOnRouteIntent: AppIntent {
+    static let title: LocalizedStringResource = "Surprise me on my route"
+    static let openAppWhenRun = true
+    func perform() async throws -> some IntentResult {
+        IntentNavigation.request("surpriseMe")
+        return .result()
+    }
+}
+
+struct StartEscapeIntent: AppIntent {
+    static let title: LocalizedStringResource = "Start Escape Mode"
+    static let openAppWhenRun = true
+    func perform() async throws -> some IntentResult {
+        IntentNavigation.request("escape")
+        return .result()
+    }
+}
+
+struct ShowNextOpportunityIntent: AppIntent {
+    static let title: LocalizedStringResource = "Show next opportunity"
+    static let openAppWhenRun = true
+    func perform() async throws -> some IntentResult {
+        IntentNavigation.request("nextOpportunity")
+        return .result()
+    }
+}
+
+struct SkipCurrentOpportunityIntent: AppIntent {
+    static let title: LocalizedStringResource = "Skip current opportunity"
+    static let openAppWhenRun = true
+    func perform() async throws -> some IntentResult {
+        IntentNavigation.request("skipOpportunity")
+        return .result()
+    }
+}
+
+struct SaveCurrentOpportunityIntent: AppIntent {
+    static let title: LocalizedStringResource = "Save current opportunity"
+    static let openAppWhenRun = true
+    func perform() async throws -> some IntentResult {
+        IntentNavigation.request("saveOpportunity")
+        return .result()
+    }
+}
+
+struct RepeatRecentJourneyIntent: AppIntent {
+    static let title: LocalizedStringResource = "Repeat recent journey"
+    static let openAppWhenRun = true
+    func perform() async throws -> some IntentResult {
+        IntentNavigation.request("repeatRecent")
+        return .result()
+    }
+}
+
+struct JourneyShortcuts: AppShortcutsProvider {
+    static var appShortcuts: [AppShortcut] {
+        AppShortcut(intent: FindOneMoreStopIntent(), phrases: ["Find one more stop in \(.applicationName)"],
+                    shortTitle: "One More Stop", systemImageName: "mappin.and.ellipse")
+        AppShortcut(intent: CoffeeUnderTenIntent(), phrases: ["Find quick coffee in \(.applicationName)"],
+                    shortTitle: "Quick coffee", systemImageName: "cup.and.saucer")
+        AppShortcut(intent: RepeatRecentJourneyIntent(), phrases: ["Repeat my journey in \(.applicationName)"],
+                    shortTitle: "Repeat journey", systemImageName: "arrow.clockwise")
+    }
+}

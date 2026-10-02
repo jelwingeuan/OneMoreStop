@@ -9,17 +9,22 @@ actor MapRequestGate {
     #if DEBUG
     private var started = 0
     private var peak = 0
+    private var cacheHits = 0
 
     struct Metrics: Sendable {
         let started: Int
         let active: Int
         let peak: Int
         let waiting: Int
+        let cacheHits: Int
     }
 
     func metrics() -> Metrics {
-        Metrics(started: started, active: active, peak: peak, waiting: waiting.count)
+        Metrics(started: started, active: active, peak: peak, waiting: waiting.count,
+                cacheHits: cacheHits)
     }
+
+    func recordCacheHit() { cacheHits += 1 }
     #endif
 
     func acquire() async throws {
@@ -202,6 +207,9 @@ final class MapSearchService: NSObject, @MainActor MKLocalSearchCompleterDelegat
     func discover(around center: Coordinate, radius: Double, category: StopCategory) async throws -> [Place] {
         let key = "\(Int((center.latitude * 100).rounded())):\(Int((center.longitude * 100).rounded())):\(Int(radius)):\(category.rawValue)"
         if let cached = discoveryCache[key], Date().timeIntervalSince(cached.1) < DiscoveryTuning.cacheLifetime {
+            #if DEBUG
+            await MapRequestGate.shared.recordCacheHit()
+            #endif
             return cached.0
         }
         if let pending = discoveryInflight[key] { return try await pending.1.value }
@@ -328,7 +336,12 @@ final class DirectionsService {
 
     func route(from origin: Place, to destination: Place) async throws -> RouteMetrics {
         let key = "\(origin.coordinate.latitude.rounded(to: 4)),\(origin.coordinate.longitude.rounded(to: 4)):\(destination.coordinate.latitude.rounded(to: 4)),\(destination.coordinate.longitude.rounded(to: 4)):car"
-        if let cached = await cache.get(key) { return cached }
+        if let cached = await cache.get(key) {
+            #if DEBUG
+            await MapRequestGate.shared.recordCacheHit()
+            #endif
+            return cached
+        }
         if let pending = inflight[key] { return try await pending.1.value }
         let requestID = UUID()
         let task = Task { @MainActor in try await requestRoute(from: origin, to: destination) }

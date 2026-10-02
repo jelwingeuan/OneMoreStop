@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXContainerItemProxy section */
+		A00000000000000000000069 /* Activity proxy */ = {isa = PBXContainerItemProxy; containerPortal = A00000000000000000000009; proxyType = 1; remoteGlobalIDString = A00000000000000000000065; remoteInfo = OneMoreStopActivity; };
 		A00000000000000000000028 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = A00000000000000000000009 /* Project object */;
@@ -23,16 +24,23 @@
 		};
 /* End PBXContainerItemProxy section */
 
+/* Begin PBXBuildFile section */
+		A00000000000000000000068 /* Activity embed */ = {isa = PBXBuildFile; fileRef = A00000000000000000000060; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		A00000000000000000000004 /* OneMoreStop.app */ = {isa = PBXFileReference; lastKnownFileType = wrapper.application; path = OneMoreStop.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A00000000000000000000005 /* OneMoreStopTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = OneMoreStopTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A00000000000000000000041 /* OneMoreStopUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = OneMoreStopUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A00000000000000000000060 /* OneMoreStopActivity.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; path = OneMoreStopActivity.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		A00000000000000000000001 /* OneMoreStop */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = OneMoreStop; sourceTree = "<group>"; };
 		A00000000000000000000002 /* OneMoreStopTests */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = OneMoreStopTests; sourceTree = "<group>"; };
 		A00000000000000000000040 /* OneMoreStopUITests */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = OneMoreStopUITests; sourceTree = "<group>"; };
+		A00000000000000000000061 /* OneMoreStopActivity */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = OneMoreStopActivity; sourceTree = "<group>"; };
+		A00000000000000000000062 /* OneMoreStopShared */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = OneMoreStopShared; sourceTree = "<group>"; };
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -51,7 +59,12 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		A00000000000000000000045 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A00000000000000000000063 /* Activity Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		A00000000000000000000067 /* Embed App Extensions */ = {isa = PBXCopyFilesBuildPhase; buildActionMask = 2147483647; dstPath = ""; dstSubfolderSpec = 13; files = (A00000000000000000000068 /* Activity embed */, ); name = "Embed App Extensions"; runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXGroup section */
 		A00000000000000000000003 = {
@@ -60,6 +73,8 @@
 				A00000000000000000000001 /* OneMoreStop */,
 				A00000000000000000000002 /* OneMoreStopTests */,
 				A00000000000000000000040 /* OneMoreStopUITests */,
+				A00000000000000000000061 /* OneMoreStopActivity */,
+				A00000000000000000000062 /* OneMoreStopShared */,
 				A00000000000000000000006 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -70,6 +85,7 @@
 				A00000000000000000000004 /* OneMoreStop.app */,
 				A00000000000000000000005 /* OneMoreStopTests.xctest */,
 				A00000000000000000000041 /* OneMoreStopUITests.xctest */,
+				A00000000000000000000060 /* OneMoreStopActivity.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -84,13 +100,16 @@
 				A00000000000000000000021 /* Sources */,
 				A00000000000000000000022 /* Frameworks */,
 				A00000000000000000000023 /* Resources */,
+				A00000000000000000000067 /* Embed App Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				A0000000000000000000006A /* Activity dependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				A00000000000000000000001 /* OneMoreStop */,
+				A00000000000000000000062 /* OneMoreStopShared */,
 			);
 			name = OneMoreStop;
 			packageProductDependencies = (
@@ -135,6 +154,19 @@
 			productReference = A00000000000000000000041 /* OneMoreStopUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		A00000000000000000000065 /* OneMoreStopActivity */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A00000000000000000000066;
+			buildPhases = (A00000000000000000000064 /* Activity Sources */, A00000000000000000000063 /* Activity Frameworks */, A0000000000000000000006B /* Activity Resources */, );
+			buildRules = ();
+			dependencies = ();
+			fileSystemSynchronizedGroups = (A00000000000000000000061 /* OneMoreStopActivity */, A00000000000000000000062 /* OneMoreStopShared */, );
+			name = OneMoreStopActivity;
+			packageProductDependencies = ();
+			productName = OneMoreStopActivity;
+			productReference = A00000000000000000000060 /* OneMoreStopActivity.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -152,6 +184,7 @@
 						TestTargetID = A00000000000000000000007;
 					};
 					A00000000000000000000042 = {CreatedOnToolsVersion = 27.0; TestTargetID = A00000000000000000000007; };
+					A00000000000000000000065 = {CreatedOnToolsVersion = 27.0; };
 				};
 			};
 			buildConfigurationList = A00000000000000000000010 /* Build configuration list for PBXProject "OneMoreStop" */;
@@ -170,6 +203,7 @@
 				A00000000000000000000007 /* OneMoreStop */,
 				A00000000000000000000008 /* OneMoreStopTests */,
 				A00000000000000000000042 /* OneMoreStopUITests */,
+				A00000000000000000000065 /* OneMoreStopActivity */,
 			);
 		};
 /* End PBXProject section */
@@ -190,6 +224,7 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		A00000000000000000000046 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A0000000000000000000006B /* Activity Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -208,6 +243,7 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		A00000000000000000000044 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A00000000000000000000064 /* Activity Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -217,6 +253,7 @@
 			targetProxy = A00000000000000000000028 /* PBXContainerItemProxy */;
 		};
 		A00000000000000000000047 /* PBXTargetDependency */ = {isa = PBXTargetDependency; target = A00000000000000000000007 /* OneMoreStop */; targetProxy = A00000000000000000000050 /* PBXContainerItemProxy */; };
+		A0000000000000000000006A /* Activity dependency */ = {isa = PBXTargetDependency; target = A00000000000000000000065 /* OneMoreStopActivity */; targetProxy = A00000000000000000000069 /* Activity proxy */; };
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
@@ -256,6 +293,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = OneMoreStop;
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Show your position and find stops along your drive. You can also choose a starting place manually.";
+				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -278,6 +316,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = OneMoreStop;
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Show your position and find stops along your drive. You can also choose a starting place manually.";
+				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -345,6 +384,46 @@
 			};
 			name = Release;
 		};
+		A0000000000000000000006C /* Activity Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "Configuration/OpportunityActivity-Info.plist";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.onemorestop.app.activity;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		A0000000000000000000006D /* Activity Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "Configuration/OpportunityActivity-Info.plist";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.onemorestop.app.activity;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -378,6 +457,12 @@
 		A00000000000000000000043 /* Build configuration list for PBXNativeTarget "OneMoreStopUITests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (A00000000000000000000048 /* Debug */, A00000000000000000000049 /* Release */);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A00000000000000000000066 /* Activity configurations */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (A0000000000000000000006C /* Activity Debug */, A0000000000000000000006D /* Activity Release */, );
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};

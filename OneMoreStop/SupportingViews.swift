@@ -59,7 +59,7 @@ struct PlaceSearchView: View {
                 }
                 if let errorMessage { Text(errorMessage).foregroundStyle(.red) }
             }
-            .navigationTitle(target == .origin ? "Starting place" : target == .replacement ? "Replacement stop" : "Destination")
+            .navigationTitle(target == .origin ? "Starting place" : target == .replacement ? "Replacement stop" : target == .meetingPlace ? "Meeting route place" : "Destination")
             .navigationBarTitleDisplayMode(.inline)
             .searchable(text: $query, prompt: "Search places")
             .onChange(of: query) { _, value in
@@ -201,6 +201,7 @@ struct SavedView: View {
     @Query(sort: \SavedCollection.createdAt, order: .reverse) private var collections: [SavedCollection]
     @Query(sort: \RecentPlace.usedAt, order: .reverse) private var recent: [RecentPlace]
     @Query(sort: \RecentJourney.createdAt, order: .reverse) private var journeys: [RecentJourney]
+    @Query(sort: \ReturnOpportunityRecord.savedAt, order: .reverse) private var returnPlaces: [ReturnOpportunityRecord]
     @State private var showNewCollection = false
     @State private var collectionName = ""
 
@@ -237,6 +238,26 @@ struct SavedView: View {
                     }
                 }
                 .id(SavedSection.places)
+                Section("Saved for another journey") {
+                    if returnPlaces.isEmpty {
+                        Text("Use Save for Return on a routed opportunity to find it again on a relevant journey.")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(returnPlaces) { record in
+                        VStack(alignment: .leading, spacing: 5) {
+                            if let item = record.snapshot {
+                                Text(item.place.name).font(.headline)
+                                Text("Originally \(TripFormatting.extraTime(item.originalDetourSeconds)); a new journey will check today's route again.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                Button("Plan a journey here") { onChoose(item.place.place) }
+                                    .font(.caption.weight(.semibold))
+                            } else {
+                                Text("Saved place unavailable").foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .onDelete { offsets in for index in offsets { modelContext.delete(returnPlaces[index]) } }
+                }
                 Section("Journeys") {
                     if journeys.isEmpty {
                         Text("Finish a journey to keep a local summary.").foregroundStyle(.secondary)
@@ -332,6 +353,7 @@ private struct CollectionView: View {
 }
 
 struct SettingsView: View {
+    let state: AppState
     let onResetNotInterested: () -> Void
     var focusTravelPreferences = false
     @Environment(\.dismiss) private var dismiss
@@ -340,7 +362,7 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             if let preference = preferences.first {
-                SettingsForm(preference: preference, onDone: { dismiss() },
+                SettingsForm(preference: preference, state: state, onDone: { dismiss() },
                              focusTravelPreferences: focusTravelPreferences,
                              onResetNotInterested: onResetNotInterested)
             } else {
@@ -352,6 +374,7 @@ struct SettingsView: View {
 
 private struct SettingsForm: View {
     @Bindable var preference: UserPreferenceRecord
+    let state: AppState
     let onDone: () -> Void
     let focusTravelPreferences: Bool
     let onResetNotInterested: () -> Void
@@ -360,6 +383,13 @@ private struct SettingsForm: View {
     #if DEBUG
     @State private var requestMetrics: MapRequestGate.Metrics?
     #endif
+
+    private var favoriteMode: DiscoveryMode? {
+        guard let raw = preference.selectedModeCounts.sorted(by: {
+            $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value
+        }).first?.key else { return nil }
+        return DiscoveryMode(rawValue: raw)
+    }
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -383,6 +413,9 @@ private struct SettingsForm: View {
                     Text("EV Journey includes charging places in Useful. Charger availability and specifications are not verified.")
                         .font(.caption).foregroundStyle(.secondary)
                     Button("Reset learned preferences") { preference.resetLearning() }
+                    if let mode = favoriteMode {
+                        LabeledContent("Most chosen mode", value: mode.title)
+                    }
                     Button("Show temporarily hidden places") { onResetNotInterested() }
                     Button("Show ignored places again") {
                         for place in ignoredPlaces { modelContext.delete(place) }
@@ -396,7 +429,7 @@ private struct SettingsForm: View {
                     }
                 }
                 Section("Privacy") {
-                    Text("Saved places and journey summaries stay on this device. Current Location is resolved when you use it; precise location trails are not stored. Apple Maps provides search and driving routes.")
+                    Text("Saved places, return-trip choices, and journey summaries stay on this device. Current Location is resolved when you use it. What Was That keeps at most five recent route positions in memory during an active journey and clears them when it ends. Radar checks location only while the app is in front; the Live Activity shows the last verified snapshot while suspended. Apple Maps provides search and driving routes.")
                         .font(.subheadline)
                 }
                 #if DEBUG
@@ -406,10 +439,25 @@ private struct SettingsForm: View {
                         LabeledContent("Active", value: "\(requestMetrics.active)")
                         LabeledContent("Peak active", value: "\(requestMetrics.peak)")
                         LabeledContent("Waiting", value: "\(requestMetrics.waiting)")
+                        LabeledContent("Cache hits", value: "\(requestMetrics.cacheHits)")
                     }
                     Button("Refresh metrics") {
                         Task { requestMetrics = await MapRequestGate.shared.metrics() }
                     }
+                    LabeledContent("Route progress", value: "\(Int(state.travelerProgress * 100))%")
+                    LabeledContent("Candidates", value: "\(state.discoveryCoverage?.places.count ?? 0)")
+                    LabeledContent("Verified", value: "\(state.recommendations.count)")
+                    LabeledContent("Radar queue", value: "\(state.opportunities.count)")
+                    LabeledContent("Expired", value: "\(state.radarExpiredCount)")
+                    LabeledContent("Next", value: state.nextOpportunity?.place.name ?? "None")
+                    LabeledContent("Mission", value: state.selectedMission?.title ?? "None")
+                    LabeledContent("Rhythm", value: state.rhythmState.rawValue)
+                    LabeledContent("Extra time left", value: TripFormatting.duration(state.remainingTime))
+                    LabeledContent("Session skips", value: "\(state.radarSkippedCount)")
+                    LabeledContent("Viewed categories", value: state.sessionViewedCategories
+                        .sorted { $0.key.rawValue < $1.key.rawValue }
+                        .map { "\($0.key.title) \($0.value)" }.joined(separator: ", "))
+                    LabeledContent("Live Activity", value: state.liveActivityRunning ? "Running" : "Off")
                 }
                 #endif
         }
@@ -482,6 +530,6 @@ struct JourneySummaryView: View {
 }
 
 enum SearchTarget: String, Identifiable {
-    case origin, destination, replacement
+    case origin, destination, replacement, meetingPlace
     var id: String { rawValue }
 }

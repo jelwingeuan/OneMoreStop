@@ -74,7 +74,7 @@ final class DetourEngine {
         let categories = mode.categories(isMalaysia: isMalaysia, localFirst: localFirst,
                                          evJourney: evJourney, adventure: budgetMinutes >= 60, mood: mood)
         let shortlisted = candidates.compactMap { place -> (Place, Double, Double, Int)? in
-            let position = GeoMath.routeProximity(place.coordinate, path: plan.baseline.path)
+            let position = GeoMath.routeProximity(place.coordinate, path: journey.path)
             let nearestLeg = journey.legs.enumerated().map { ($0.offset, GeoMath.routeProximity(place.coordinate, path: $0.element.path).distance) }
                 .min { $0.1 < $1.1 }
             guard let nearestLeg, nearestLeg.1 <= radius * 1.4, position.progress < 0.99,

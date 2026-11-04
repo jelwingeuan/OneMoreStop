@@ -303,6 +303,11 @@ final class AppState {
         Task { [liveOpportunity] in await liveOpportunity.end() }
     }
 
+    func endOrphanedLiveActivities() async {
+        guard !activeJourney else { return }
+        await liveOpportunity.end()
+    }
+
     func completeActiveJourney() {
         guard activeJourney, let route, let journey else { return }
         lastRecap = JourneyRecap(destination: route.destination.name,
@@ -729,6 +734,7 @@ final class AppState {
         let requestID = UUID()
         discoveryID = requestID
         recommendations = []
+        updateRadar()
         phase = .discoveringPlaces
         discoveryTask = Task { [weak self] in
             guard let self else { return }
@@ -819,21 +825,23 @@ final class AppState {
     }
 
     func addStop(_ recommendation: StopRecommendation) -> Bool {
-        guard !journeyBusy, let journey, canAddStop else { return false }
-        let index = min(recommendation.insertionIndex, journey.stops.count)
+        guard !journeyBusy, let journey, canAddStop,
+              let current = recommendations.first(where: { $0.id == recommendation.id }),
+              journey.legs.indices.contains(current.insertionIndex) else { return false }
+        let index = current.insertionIndex
         var legs = journey.legs
-        legs.replaceSubrange(index...index, with: [recommendation.firstLeg, recommendation.secondLeg])
-        let updated = Journey(stops: JourneyMath.inserted(recommendation.place, into: journey.stops, at: index),
+        legs.replaceSubrange(index...index, with: [current.firstLeg, current.secondLeg])
+        let updated = Journey(stops: JourneyMath.inserted(current.place, into: journey.stops, at: index),
                               legs: legs, baseline: journey.baseline)
         guard updated.extraDuration <= allowedExtraDriving + 1 else {
             journeyMessage = "This stop now exceeds your extra driving time budget. Try a wider budget."
             return false
         }
         self.journey = updated
-        radar.accept(recommendation.id)
+        radar.accept(current.id)
         opportunities = radar.queue
         openedLegCount = 0
-        focusedRecommendationID = recommendation.id
+        focusedRecommendationID = current.id
         journeyMessage = nil
         discover()
         return true

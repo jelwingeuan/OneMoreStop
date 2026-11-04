@@ -85,7 +85,8 @@ struct PlaceDetailView: View {
     let recommendation: StopRecommendation
     let distanceUnit: String
     let isSelected: Bool
-    let canAdd: Bool
+    let addUnavailableReason: String?
+    let hasCurrentDrivingTime: Bool
     let onAdd: () -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -112,9 +113,11 @@ struct PlaceDetailView: View {
                             Text(address).font(.subheadline).foregroundStyle(.secondary)
                         }
                     }
-                    HStack(spacing: 26) {
-                        metric("Extra driving", TripFormatting.extraTime(recommendation.detourTime))
-                        metric("Extra distance", TripFormatting.distance(recommendation.detourDistance, preference: distanceUnit))
+                    if hasCurrentDrivingTime {
+                        HStack(spacing: 26) {
+                            metric("Extra driving", TripFormatting.extraTime(recommendation.detourTime))
+                            metric("Extra distance", TripFormatting.distance(recommendation.detourDistance, preference: distanceUnit))
+                        }
                     }
                     if let phone = recommendation.place.phone { LabeledContent("Phone", value: phone) }
                     if let website = recommendation.place.website { Link("Website", destination: website) }
@@ -150,8 +153,10 @@ struct PlaceDetailView: View {
                         .buttonStyle(.borderedProminent)
                         .tint(.orange)
                         .frame(maxWidth: .infinity)
-                        .disabled(isSelected || !canAdd)
-                    if !canAdd && !isSelected { Text("Three stops is the limit for this journey.").font(.caption) }
+                        .disabled(isSelected || addUnavailableReason != nil)
+                    if let addUnavailableReason, !isSelected {
+                        Text(addUnavailableReason).font(.caption).foregroundStyle(.secondary)
+                    }
                 }
                 .padding(20)
             }

@@ -32,13 +32,13 @@ struct OpportunityRadarTests {
         radar.update([item("near", progress: 0.2, score: 90),
                       item("far", progress: 0.7, score: 80),
                       item("costly", progress: 0.8, score: 100, detour: 900)], context: context())
-        #expect(radar.queue.map(\.id) == ["near", "far"])
+        #expect(radar.queue.map(\.place.name) == ["near", "far"])
         #expect(radar.next?.status == .surfaced)
         radar.update([item("near", progress: 0.2, score: 90), item("far", progress: 0.7, score: 80)],
                      context: context(progress: 0.5))
-        #expect(radar.queue.map(\.id) == ["far"])
+        #expect(radar.queue.map(\.place.name) == ["far"])
         #expect(radar.expiredCount >= 1)
-        #expect(radar.statusByID["near"] == .expired)
+        #expect(radar.statusByID[Place.key(identifier: nil, name: "near", coordinate: a)] == .expired)
     }
 
     @Test func skipAndDiversityRemainSessionLocal() {
@@ -99,10 +99,10 @@ struct OpportunityRadarTests {
                            item("third", progress: 0.5, score: 103)]
         radar.update([item("current", progress: 0.2, score: 80)] + challengers,
                      context: context(), now: start.addingTimeInterval(30))
-        #expect(radar.next?.id == "current")
+        #expect(radar.next?.place.name == "current")
         #expect(radar.queue.count == 3)
         radar.update([item("current", progress: 0.2, score: 80)] + challengers,
                      context: context(), now: start.addingTimeInterval(240))
-        #expect(radar.next?.id == "first")
+        #expect(radar.next?.place.name == "first")
     }
 }

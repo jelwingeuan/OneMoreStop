@@ -69,7 +69,7 @@ struct V4PlanningTests {
                                 baseline: metrics, createdAt: .now)
         let journey = Journey(stops: [], legs: [metrics], baseline: metrics)
         #expect(ReturnTripMatcher.candidates([saved], route: reverse, journey: journey,
-                                             travelerProgress: 0).map(\.id) == ["view"])
+                                             travelerProgress: 0).map(\.name) == ["View"])
         #expect(ReturnTripMatcher.candidates([saved], route: reverse, journey: journey,
                                              travelerProgress: 0.9).isEmpty)
     }
@@ -128,6 +128,56 @@ struct V4PlanningTests {
         let rejected = try await engine.chains(route: route, journey: journey,
                                                 candidates: candidates, budget: 10 * 60)
         #expect(rejected.isEmpty)
+    }
+
+    @Test func addStopUsesOnlyTheCurrentVerifiedLegs() {
+        let origin = Place(id: "start", name: "Start", coordinate: a)
+        let destination = Place(id: "end", name: "End", coordinate: b)
+        let oldPlace = Place(id: "stop", name: "Old stop", coordinate: a)
+        let currentPlace = Place(id: "stop", name: "Current stop", coordinate: b)
+        let baseline = RouteMetrics(duration: 60 * 60, distance: 40_000, path: [a, b])
+        let oldLeg = RouteMetrics(duration: 10 * 60, distance: 5_000, path: [a, b])
+        let first = RouteMetrics(duration: 35 * 60, distance: 23_000, path: [a, b])
+        let second = RouteMetrics(duration: 37 * 60, distance: 24_000, path: [a, b])
+        let captured = StopRecommendation(place: oldPlace, detourTime: 0, detourDistance: 0,
+            distanceFromRoute: 0, progress: 0.2, score: 90, firstLeg: oldLeg, secondLeg: oldLeg)
+        let current = StopRecommendation(place: currentPlace, detourTime: 12 * 60, detourDistance: 7_000,
+            distanceFromRoute: 0, progress: 0.2, score: 90, firstLeg: first, secondLeg: second)
+        let state = AppState()
+        state.route = RoutePlan(id: UUID(), origin: origin, destination: destination,
+                                baseline: baseline, createdAt: .now)
+        state.journey = Journey(stops: [], legs: [baseline], baseline: baseline)
+        state.budgetMinutes = 20
+
+        #expect(!state.addStop(captured))
+        #expect(state.journey?.stops.isEmpty == true)
+        state.recommendations = [current]
+        #expect(state.addStop(captured))
+        #expect(state.journey?.stops.first?.name == "Current stop")
+        #expect(state.journey?.drivingDuration == 4_320.0)
+    }
+
+    @Test func rediscoveryRemovesAnUnavailableOpportunityImmediately() {
+        let origin = Place(id: "start", name: "Start", coordinate: a)
+        let destination = Place(id: "end", name: "End", coordinate: b)
+        let stop = Place(id: "stop", name: "Coffee", coordinate: a, category: .coffee)
+        let baseline = RouteMetrics(duration: 3_600, distance: 30_000, path: [a, b])
+        let route = RoutePlan(id: UUID(), origin: origin, destination: destination,
+                              baseline: baseline, createdAt: .now)
+        let state = AppState()
+        state.route = route
+        state.journey = Journey(stops: [], legs: [baseline], baseline: baseline)
+        state.recommendations = [StopRecommendation(place: stop, detourTime: 300, detourDistance: 500,
+            distanceFromRoute: 0, progress: 0.2, score: 80, firstLeg: baseline, secondLeg: baseline)]
+        state.opportunities = [JourneyOpportunity(place: PlaceSnapshot(stop), routeID: route.id,
+            progress: 0.2, distanceAhead: 1_000, approximateMinutesAhead: 5,
+            incrementalDriving: 300, totalDetour: 300, score: 80, reasons: [],
+            source: .corridor, status: .surfaced, expiresAtProgress: 0.25)]
+
+        state.discover()
+
+        #expect(state.recommendations.isEmpty)
+        #expect(state.opportunities.isEmpty)
     }
 
     @Test func meetingFairnessCanBeOverriddenByTotalDetour() {
@@ -221,5 +271,15 @@ struct V4PlanningTests {
         #expect(state.isTravelerOnRoute)
         #expect(state.timeMachinePreview == nil)
         #expect(!state.routeComparisonBusy)
+    }
+
+    @Test func startupEndsOnlyOrphanedActivity() async {
+        let fake = FakeActivityProvider()
+        let state = AppState(liveOpportunity: fake)
+        await state.endOrphanedLiveActivities()
+        #expect(fake.endCount == 1)
+        state.activeJourney = true
+        await state.endOrphanedLiveActivities()
+        #expect(fake.endCount == 1)
     }
 }

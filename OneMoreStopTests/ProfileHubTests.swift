@@ -66,6 +66,31 @@ struct ProfileHubTests {
         #expect(try reader.fetch(FetchDescriptor<SavedPlace>()).count == 1)
     }
 
+    @Test @MainActor func failedProfileSaveRestoresEveryField() {
+        enum SaveFailure: Error { case simulated }
+        let profile = UserProfileRecord(displayName: "Before", bio: "Old bio", avatarData: Data([1]))
+        let originalDate = Date(timeIntervalSince1970: 1_000)
+        profile.updatedAt = originalDate
+
+        do {
+            try profile.saveChanges({
+                profile.displayName = "After"
+                profile.bio = "New bio"
+                profile.avatarData = Data([2])
+                profile.updatedAt = .now
+            }, save: { throw SaveFailure.simulated })
+            Issue.record("The failed save was treated as successful")
+        } catch is SaveFailure {
+        } catch {
+            Issue.record("The original save error was replaced")
+        }
+
+        #expect(profile.displayName == "Before")
+        #expect(profile.bio == "Old bio")
+        #expect(profile.avatarData == Data([1]))
+        #expect(profile.updatedAt == originalDate)
+    }
+
     @Test @MainActor func existingStoreOpensAfterProfileModelIsAdded() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

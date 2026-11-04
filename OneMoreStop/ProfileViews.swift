@@ -300,14 +300,13 @@ private struct EditProfileView: View {
                         photoRequestID = UUID()
                         selectedPhoto = nil
                         isProcessing = false
-                        let previous = profile.avatarData
-                        profile.avatarData = nil
-                        profile.updatedAt = .now
                         do {
-                            try modelContext.save()
+                            try profile.saveChanges({
+                                profile.avatarData = nil
+                                profile.updatedAt = .now
+                            }, save: modelContext.save)
                             UINotificationFeedbackGenerator().notificationOccurred(.success)
                         } catch {
-                            profile.avatarData = previous
                             errorMessage = "Couldn’t remove the photo. Try again."
                         }
                     }
@@ -331,11 +330,12 @@ private struct EditProfileView: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button("Save") {
-                    profile.displayName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-                    profile.bio = bio.trimmingCharacters(in: .whitespacesAndNewlines)
-                    profile.updatedAt = .now
                     do {
-                        try modelContext.save()
+                        try profile.saveChanges({
+                            profile.displayName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                            profile.bio = bio.trimmingCharacters(in: .whitespacesAndNewlines)
+                            profile.updatedAt = .now
+                        }, save: modelContext.save)
                         UINotificationFeedbackGenerator().notificationOccurred(.success)
                         dismiss()
                     } catch { errorMessage = "Couldn’t save your profile. Try again." }
@@ -362,11 +362,10 @@ private struct EditProfileView: View {
                 let data = try await AvatarImageProcessor.shared.process(imported.url)
                 try Task.checkCancellation()
                 guard photoRequestID == requestID else { return }
-                let previous = profile.avatarData
-                profile.avatarData = data
-                profile.updatedAt = .now
-                do { try modelContext.save() }
-                catch { profile.avatarData = previous; throw error }
+                try profile.saveChanges({
+                    profile.avatarData = data
+                    profile.updatedAt = .now
+                }, save: modelContext.save)
                 UINotificationFeedbackGenerator().notificationOccurred(.success)
             } catch is CancellationError {
             } catch {
@@ -375,6 +374,19 @@ private struct EditProfileView: View {
                 }
             }
             if photoRequestID == requestID { isProcessing = false }
+        }
+    }
+}
+
+@MainActor
+extension UserProfileRecord {
+    func saveChanges(_ change: () -> Void, save: () throws -> Void) throws {
+        let previous = (displayName, bio, avatarData, updatedAt)
+        change()
+        do { try save() }
+        catch {
+            (displayName, bio, avatarData, updatedAt) = previous
+            throw error
         }
     }
 }

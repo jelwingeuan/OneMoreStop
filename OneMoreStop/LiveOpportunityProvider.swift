@@ -47,8 +47,12 @@ final class LiveOpportunityProvider: LiveActivityProviding {
         let active = activity
         activity = nil
         lastContent = nil
+        lastUpdate = .distantPast
         if let active {
             await active.end(nil, dismissalPolicy: .immediate)
+        }
+        for previous in Activity<JourneyActivityAttributes>.activities where previous.id != active?.id {
+            await previous.end(nil, dismissalPolicy: .immediate)
         }
     }
 }

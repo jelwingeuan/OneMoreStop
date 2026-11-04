@@ -75,6 +75,7 @@ struct HomeView: View {
     }
 
     private func loadInitialState() async {
+        await state.endOrphanedLiveActivities()
         let preference: UserPreferenceRecord
         if let existing = preferences.first { preference = existing }
         else {
@@ -249,10 +250,15 @@ private struct ExploreView: View {
             }
         }
         .sheet(item: $detail, onDismiss: { if state.route != nil && tab == 0 { showJourney = true } }) { recommendation in
-            PlaceDetailView(recommendation: recommendation,
+            let current = state.recommendations.first(where: { $0.id == recommendation.id })
+            let unavailableReason = !state.canAddStop ? "Three stops is the limit for this journey." :
+                state.journeyBusy ? "Trip is being recalculated." :
+                current == nil ? "Driving time needs checking again. Close this place and choose it from the updated results." : nil
+            PlaceDetailView(recommendation: current ?? recommendation,
                             distanceUnit: distanceUnit,
                             isSelected: state.selectedStops.contains(where: { $0.id == recommendation.id }),
-                            canAdd: state.canAddStop) {
+                            addUnavailableReason: unavailableReason,
+                            hasCurrentDrivingTime: current != nil) {
                 if state.addStop(recommendation) {
                     modelContext.insert(RecentPlace(recommendation.place, kind: "stop"))
                     preferences.first?.recordSelection(recommendation.place.category)
@@ -509,7 +515,8 @@ private struct ExploreView: View {
         case .planning: activity = "Planning journey."
         case .idle: activity = ""
         }
-        return "Profile, \(name). \(TripFormatting.duration(remaining)) Adventure Time remaining. \(activity)"
+        let budgetLabel = state.timeBudget.deadline == nil ? "Adventure Time" : "arrival margin"
+        return "Profile, \(name). \(TripFormatting.duration(remaining)) \(budgetLabel) remaining. \(activity)"
     }
 
     private func presentProfile(edit: Bool = false) {

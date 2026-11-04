@@ -199,4 +199,27 @@ struct V4PlanningTests {
         try await Task.sleep(for: .milliseconds(20))
         #expect(fake.endCount >= 1)
     }
+
+    @Test func repeatingSavedJourneyClearsActiveRouteProgress() async {
+        let origin = Place(id: "old-origin", name: "Old start", coordinate: a)
+        let destination = Place(id: "old-destination", name: "Old end", coordinate: b)
+        let saved = RecentJourney(origin: origin, destination: destination, stops: [],
+                                  budgetMinutes: 20, drivingDuration: 3_600, extraDuration: 0)
+        let state = AppState(liveOpportunity: FakeActivityProvider())
+        state.activeJourney = true
+        state.liveActivityRunning = true
+        state.travelerProgress = 0.8
+        state.isTravelerOnRoute = false
+        state.timeMachinePreview = 45
+        state.routeComparisonBusy = true
+
+        await state.repeatJourney(saved)
+
+        #expect(!state.activeJourney)
+        #expect(!state.liveActivityRunning)
+        #expect(state.travelerProgress == 0)
+        #expect(state.isTravelerOnRoute)
+        #expect(state.timeMachinePreview == nil)
+        #expect(!state.routeComparisonBusy)
+    }
 }

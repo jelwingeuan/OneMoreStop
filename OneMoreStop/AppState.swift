@@ -936,11 +936,17 @@ final class AppState {
         budgetMinutes = saved.budgetMinutes
         plannedVisitMinutes = saved.plannedVisits
         cancelWork()
+        endActiveJourney()
         guard let origin, let destination else { return }
         journeyBusy = false
         journeyMessage = nil
         route = nil
         journey = nil
+        travelerProgress = 0
+        isTravelerOnRoute = true
+        timeMachinePreview = nil
+        resetRouteComparison()
+        spontaneousPlan = nil
         recommendations = []
         openedLegCount = 0
         phase = .findingRoute

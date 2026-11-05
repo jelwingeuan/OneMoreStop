@@ -13,6 +13,54 @@ struct DiscoveryLogicTests {
                                                       plannedVisits: 30 * 60, now: now) == 8 * 60)
     }
 
+    @Test func activeDeadlineUsesRemainingDrivingInsteadOfTheWholeRoute() {
+        let start = Date(timeIntervalSince1970: 1_000_000)
+        let now = start.addingTimeInterval(60 * 60)
+        let budget = ActiveDeadlineBudget(deadline: start.addingTimeInterval(150 * 60),
+                                          now: now, baselineDriving: 120 * 60,
+                                          journeyDriving: 120 * 60, routeProgress: 0.5,
+                                          remainingPlannedVisits: 0)
+        #expect(budget.estimatedRemainingDriving == 60 * 60)
+        #expect(budget.remainingMargin == 30 * 60)
+        #expect(budget.allowedTotalDetour == 30 * 60)
+    }
+
+    @Test func activeDeadlineAddsAvailableMarginToTheExistingTotalDetour() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let budget = ActiveDeadlineBudget(deadline: now.addingTimeInterval(60 * 60),
+                                          now: now, baselineDriving: 60 * 60,
+                                          journeyDriving: 72 * 60, routeProgress: 0.5,
+                                          remainingPlannedVisits: 10 * 60)
+        #expect(budget.estimatedRemainingDriving == 36 * 60)
+        #expect(budget.remainingMargin == 14 * 60)
+        #expect(budget.allowedTotalDetour == 26 * 60)
+        #expect(25 * 60 <= budget.allowedTotalDetour)
+        #expect(27 * 60 > budget.allowedTotalDetour)
+    }
+
+    @Test func activeDeadlineClampsProgressAndOverdueAllowance() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let deadline = now.addingTimeInterval(30 * 60)
+        let overdue = ActiveDeadlineBudget(deadline: deadline, now: now,
+                                            baselineDriving: 60 * 60, journeyDriving: 72 * 60,
+                                            routeProgress: 0.5, remainingPlannedVisits: 0)
+        #expect(overdue.remainingMargin == 0)
+        #expect(overdue.allowedTotalDetour == 6 * 60)
+
+        let beforeStart = ActiveDeadlineBudget(deadline: deadline, now: now,
+                                                baselineDriving: 60 * 60, journeyDriving: 72 * 60,
+                                                routeProgress: -0.5, remainingPlannedVisits: 0)
+        let unknownProgress = ActiveDeadlineBudget(deadline: deadline, now: now,
+                                                    baselineDriving: 60 * 60, journeyDriving: 72 * 60,
+                                                    routeProgress: .nan, remainingPlannedVisits: 0)
+        #expect(beforeStart.estimatedRemainingDriving == 72 * 60)
+        #expect(unknownProgress.estimatedRemainingDriving == beforeStart.estimatedRemainingDriving)
+        let pastFinish = ActiveDeadlineBudget(deadline: deadline, now: now,
+                                               baselineDriving: 60 * 60, journeyDriving: 72 * 60,
+                                               routeProgress: 1.5, remainingPlannedVisits: 0)
+        #expect(pastFinish.estimatedRemainingDriving == 0)
+    }
+
     @Test func routeProgressDistinguishesAheadAndBehind() {
         let path = [Coordinate(latitude: 3, longitude: 101), Coordinate(latitude: 3, longitude: 102)]
         let progress = GeoMath.routeProgress(Coordinate(latitude: 3.001, longitude: 101.5), path: path)
@@ -365,6 +413,48 @@ struct DiscoveryLogicTests {
         let metrics = await gate.metrics()
         #expect(metrics.peak == DiscoveryTuning.maxConcurrentRequests)
         #expect(metrics.waiting == 0)
+        #endif
+    }
+
+    @Test @MainActor func globalMapGateWaitsForCapacityFromMainActor() async throws {
+        let gate = MapRequestGate()
+        for _ in 0..<DiscoveryTuning.maxConcurrentRequests { try await gate.acquire() }
+        let queued = Task { @MainActor in
+            try await gate.acquire()
+            await gate.release()
+        }
+        #if DEBUG
+        var waiting = 0
+        for _ in 0..<100 {
+            waiting = await gate.metrics().waiting
+            if waiting == 1 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(waiting == 1)
+        #endif
+        await gate.release()
+        try await queued.value
+        for _ in 1..<DiscoveryTuning.maxConcurrentRequests { await gate.release() }
+        #if DEBUG
+        let metrics = await gate.metrics()
+        #expect(metrics.peak == DiscoveryTuning.maxConcurrentRequests)
+        #expect(metrics.waiting == 0)
+        #endif
+    }
+
+    @Test func globalMapGateHandlesCancellationBeforeRegistration() async throws {
+        let gate = MapRequestGate()
+        for _ in 0..<DiscoveryTuning.maxConcurrentRequests { try await gate.acquire() }
+        let queued = Task { try await gate.acquire() }
+        queued.cancel()
+        do {
+            try await queued.value
+            Issue.record("A canceled request unexpectedly acquired the gate")
+        } catch is CancellationError {
+        }
+        for _ in 0..<DiscoveryTuning.maxConcurrentRequests { await gate.release() }
+        #if DEBUG
+        #expect(await gate.metrics().waiting == 0)
         #endif
     }
 }

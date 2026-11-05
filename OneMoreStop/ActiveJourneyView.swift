@@ -36,7 +36,7 @@ struct ActiveJourneyView: View {
                             }
                             Text("\(TripFormatting.duration(journey.drivingDuration)) total routed driving")
                                 .font(.subheadline).foregroundStyle(.secondary)
-                            Text("\(state.timeBudget.deadline == nil ? "Adventure Time" : "Arrival margin"): \(TripFormatting.duration(state.remainingTime))")
+                            Text("\(state.timeBudget.deadline == nil ? "Adventure Time" : "Approx. arrival margin"): \(TripFormatting.duration(state.remainingTime))")
                                 .font(.headline).foregroundStyle(.orange)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)

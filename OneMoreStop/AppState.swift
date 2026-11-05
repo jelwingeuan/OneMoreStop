@@ -105,18 +105,49 @@ final class AppState {
     var plannedVisitSeconds: TimeInterval {
         selectedStops.reduce(0) { $0 + Double(plannedVisitMinutes[$1.id, default: 0] * 60) }
     }
+    private func remainingPlannedVisitSeconds(for visits: [String: Int]) -> TimeInterval {
+        guard activeJourney, isTravelerOnRoute, let journey,
+              journey.legs.count > journey.stops.count, journey.drivingDistance > 0 else {
+            return Double(visits.values.reduce(0, +) * 60)
+        }
+        var distanceToStop = 0.0
+        return journey.stops.enumerated().reduce(0.0) { remaining, entry in
+            distanceToStop += journey.legs[entry.offset].distance
+            let progress = distanceToStop / journey.drivingDistance
+            return remaining + (progress + 0.02 >= travelerProgress
+                ? Double(visits[entry.element.id, default: 0] * 60) : 0)
+        }
+    }
+    private func activeDeadlineBudget(at date: Date, visits: [String: Int]? = nil) -> ActiveDeadlineBudget? {
+        guard activeJourney, isTravelerOnRoute, case .arriveBy(let deadline) = timeBudget,
+              let route, let journey else { return nil }
+        return ActiveDeadlineBudget(deadline: deadline, now: date,
+                                    baselineDriving: route.baseline.duration,
+                                    journeyDriving: journey.drivingDuration,
+                                    routeProgress: travelerProgress,
+                                    remainingPlannedVisits: remainingPlannedVisitSeconds(for: visits ?? plannedVisitMinutes))
+    }
     var allowedExtraDriving: TimeInterval {
-        timeBudget.allowedExtraDriving(baseline: route?.baseline.duration ?? 0,
-                                       plannedVisits: plannedVisitSeconds, now: clockNow)
+        if let active = activeDeadlineBudget(at: clockNow) { return active.allowedTotalDetour }
+        return timeBudget.allowedExtraDriving(baseline: route?.baseline.duration ?? 0,
+                                              plannedVisits: plannedVisitSeconds, now: clockNow)
     }
     var remainingTime: TimeInterval {
-        timeBudget.remaining(baseline: route?.baseline.duration ?? 0,
-                             journey: journey?.drivingDuration ?? route?.baseline.duration ?? 0,
-                             plannedVisits: plannedVisitSeconds, now: clockNow)
+        if let active = activeDeadlineBudget(at: clockNow) { return active.remainingMargin }
+        return timeBudget.remaining(baseline: route?.baseline.duration ?? 0,
+                                    journey: journey?.drivingDuration ?? route?.baseline.duration ?? 0,
+                                    plannedVisits: plannedVisitSeconds, now: clockNow)
     }
     var drivingArrival: Date? { journey.map { clockNow.addingTimeInterval($0.drivingDuration) } }
     var activeDrivingArrival: Date? {
-        journey.map { clockNow.addingTimeInterval($0.drivingDuration * max(0, 1 - travelerProgress)) }
+        guard isTravelerOnRoute, let journey else { return nil }
+        return clockNow.addingTimeInterval(journey.drivingDuration * max(0, 1 - travelerProgress))
+    }
+    func profileDrivingArrival(at date: Date) -> Date? {
+        guard let journey else { return nil }
+        guard activeJourney else { return date.addingTimeInterval(journey.drivingDuration) }
+        guard isTravelerOnRoute else { return nil }
+        return date.addingTimeInterval(journey.drivingDuration * max(0, 1 - travelerProgress))
     }
     var plannedArrival: Date? { drivingArrival?.addingTimeInterval(plannedVisitSeconds) }
     var profileOriginalAllowance: TimeInterval {
@@ -126,9 +157,10 @@ final class AppState {
         }
     }
     func profileRemainingTime(at now: Date) -> TimeInterval {
-        timeBudget.remaining(baseline: route?.baseline.duration ?? 0,
-                             journey: journey?.drivingDuration ?? route?.baseline.duration ?? 0,
-                             plannedVisits: plannedVisitSeconds, now: now)
+        if let active = activeDeadlineBudget(at: now) { return active.remainingMargin }
+        return timeBudget.remaining(baseline: route?.baseline.duration ?? 0,
+                                    journey: journey?.drivingDuration ?? route?.baseline.duration ?? 0,
+                                    plannedVisits: plannedVisitSeconds, now: now)
     }
     var profileAvatarState: ProfileAvatarState {
         ProfileAvatarState.resolve(hasRoute: route != nil,
@@ -160,6 +192,8 @@ final class AppState {
     private var discoveryID = UUID()
     private let radar = OpportunityRadarEngine()
     @ObservationIgnored private let liveOpportunity: any LiveActivityProviding
+    @ObservationIgnored private var liveActivityTask: Task<Void, Never>?
+    @ObservationIgnored private var liveActivityGeneration = 0
 
     init(liveOpportunity: any LiveActivityProviding = LiveOpportunityProvider()) {
         self.liveOpportunity = liveOpportunity
@@ -266,7 +300,7 @@ final class AppState {
     }
 
     func startActiveJourney() {
-        guard let route, journey != nil else { return }
+        guard !activeJourney, let route, journey != nil else { return }
         completedRouteID = nil
         completionMoment = false
         sessionSavedReturnIDs = []
@@ -275,16 +309,7 @@ final class AppState {
         activeMessage = location.isAuthorized ? nil : "Location is off. Apple Maps directions still work; live progress needs location access."
         lastActiveDiscoveryAt = nil
         lastActiveReminderID = nil
-        if FeatureFlags.liveActivityOpportunity, let content = liveActivityContent {
-            Task { [weak self] in
-                guard let self else { return }
-                guard activeJourney, self.route?.id == route.id else { return }
-                await liveOpportunity.start(routeID: route.id, content: content)
-                if activeJourney, self.route?.id == route.id {
-                    liveActivityRunning = liveOpportunity.isRunning
-                } else { await liveOpportunity.end() }
-            }
-        }
+        if FeatureFlags.liveActivityOpportunity { scheduleLiveActivityStart(routeID: route.id) }
     }
 
     func endActiveJourney() {
@@ -300,12 +325,45 @@ final class AppState {
         whatWasThatResults = []
         whatWasThatBusy = false
         liveActivityRunning = false
-        Task { [liveOpportunity] in await liveOpportunity.end() }
+        scheduleLiveActivityEnd()
     }
 
     func endOrphanedLiveActivities() async {
+        await liveActivityTask?.value
         guard !activeJourney else { return }
-        await liveOpportunity.end()
+        scheduleLiveActivityEnd()
+        await liveActivityTask?.value
+    }
+
+    private func scheduleLiveActivityStart(routeID: UUID) {
+        liveActivityGeneration += 1
+        let generation = liveActivityGeneration
+        let previous = liveActivityTask
+        liveActivityTask = Task { [weak self, liveOpportunity] in
+            await previous?.value
+            guard let self, liveActivityGeneration == generation, activeJourney,
+                  route?.id == routeID, let content = liveActivityContent else { return }
+            await liveOpportunity.start(routeID: routeID, content: content)
+            if liveActivityGeneration == generation {
+                liveActivityRunning = liveOpportunity.isRunning
+                liveActivityTask = nil
+            }
+        }
+    }
+
+    private func scheduleLiveActivityEnd() {
+        liveActivityGeneration += 1
+        let generation = liveActivityGeneration
+        let previous = liveActivityTask
+        liveActivityTask = Task { [weak self, liveOpportunity] in
+            await previous?.value
+            guard let self, liveActivityGeneration == generation else { return }
+            await liveOpportunity.end()
+            if liveActivityGeneration == generation {
+                liveActivityRunning = false
+                liveActivityTask = nil
+            }
+        }
     }
 
     func completeActiveJourney() {
@@ -441,7 +499,7 @@ final class AppState {
     func selectDeadline(_ deadline: Date) {
         guard !journeyBusy, deadline > clockNow else { return }
         timeBudget = .arriveBy(deadline)
-        deadlineOriginalAllowance = allowedExtraDriving
+        deadlineOriginalAllowance = activeJourney ? remainingTime : allowedExtraDriving
         discover()
     }
 
@@ -567,11 +625,13 @@ final class AppState {
     func ignore(_ place: Place) {
         ignoredPlaceIDs.insert(place.id)
         recommendations.removeAll { $0.id == place.id }
+        updateRadar()
     }
 
     func notInterested(_ place: Place) {
         notInterestedIDs.insert(place.id)
         recommendations.removeAll { $0.id == place.id }
+        updateRadar()
     }
 
     func clearNotInterested() {
@@ -893,6 +953,7 @@ final class AppState {
         discoveryTask?.cancel()
         directions.cancelAll()
         recommendations = []
+        updateRadar()
         journeyBusy = true
         journeyMessage = nil
         journeyTask = Task { [weak self] in
@@ -906,7 +967,11 @@ final class AppState {
                 }
                 try Task.checkCancellation()
                 let updated = Journey(stops: stops, legs: legs, baseline: route.baseline)
-                guard updated.extraDuration <= allowedExtraDriving + 1 ||
+                let retainedVisits = plannedVisitMinutes.filter { key, _ in stops.contains { $0.id == key } }
+                let proposedAllowance = activeDeadlineBudget(at: clockNow, visits: retainedVisits)?.allowedTotalDetour
+                    ?? timeBudget.allowedExtraDriving(baseline: route.baseline.duration,
+                        plannedVisits: Double(retainedVisits.values.reduce(0, +) * 60), now: clockNow)
+                guard updated.extraDuration <= proposedAllowance + 1 ||
                         stops.count < (journey?.stops.count ?? 0) else {
                     journeyMessage = "That order exceeds your time budget. Your previous trip is still here."
                     journeyBusy = false
@@ -914,7 +979,7 @@ final class AppState {
                     return
                 }
                 journey = updated
-                plannedVisitMinutes = plannedVisitMinutes.filter { key, _ in stops.contains { $0.id == key } }
+                plannedVisitMinutes = retainedVisits
                 openedLegCount = 0
                 journeyBusy = false
                 discover()

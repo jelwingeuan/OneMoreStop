@@ -84,10 +84,29 @@ struct JourneyRecordSession {
                          in context: ModelContext) throws -> RecentJourney {
         if routeID == route.id, let recordID,
            let existing = try context.fetch(FetchDescriptor<RecentJourney>()).first(where: { $0.id == recordID }) {
-            let wasSaved = existing.saved
+            let refreshed = RecentJourney(origin: route.origin, destination: route.destination,
+                                          stops: journey.stops, budgetMinutes: budgetMinutes,
+                                          drivingDuration: journey.drivingDuration,
+                                          extraDuration: journey.extraDuration, saved: saved,
+                                          plannedVisits: plannedVisits)
+            let previous = (existing.destinationName, existing.snapshotData, existing.originWasCurrent,
+                            existing.budgetMinutes, existing.drivingDuration, existing.extraDuration,
+                            existing.plannedVisitsData, existing.saved)
+            existing.destinationName = refreshed.destinationName
+            existing.snapshotData = refreshed.snapshotData
+            existing.originWasCurrent = refreshed.originWasCurrent
+            existing.budgetMinutes = refreshed.budgetMinutes
+            existing.drivingDuration = refreshed.drivingDuration
+            existing.extraDuration = refreshed.extraDuration
+            existing.plannedVisitsData = refreshed.plannedVisitsData
             existing.saved = existing.saved || saved
             do { try context.save(); return existing }
-            catch { existing.saved = wasSaved; throw error }
+            catch {
+                (existing.destinationName, existing.snapshotData, existing.originWasCurrent,
+                 existing.budgetMinutes, existing.drivingDuration, existing.extraDuration,
+                 existing.plannedVisitsData, existing.saved) = previous
+                throw error
+            }
         }
         let record = RecentJourney(origin: route.origin, destination: route.destination,
                                    stops: journey.stops, budgetMinutes: budgetMinutes,

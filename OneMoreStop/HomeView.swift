@@ -345,9 +345,27 @@ private struct ExploreView: View {
             Button("OK", role: .cancel) {}
         } message: { Text("Try completing the journey again.") }
         .onChange(of: state.route?.id) { _, routeID in
-            showJourney = routeID != nil && tab == 0
+            if routeID == nil {
+                showJourney = false
+                showActive = false
+            } else if tab == 0 {
+                showJourney = !state.activeJourney
+                if state.activeJourney { showActive = true }
+            }
         }
-        .onChange(of: tab) { _, value in showJourney = value == 0 && state.route != nil }
+        .onChange(of: tab) { _, value in
+            guard value == 0, state.route != nil else {
+                showJourney = false
+                showActive = false
+                return
+            }
+            if state.activeJourney {
+                showJourney = false
+                showActive = true
+            } else {
+                showJourney = true
+            }
+        }
         .onChange(of: state.camera.positionedByUser) { _, moved in
             if moved { state.cameraWasMovedByUser = true; state.exploringArea = true }
         }
@@ -401,7 +419,7 @@ private struct ExploreView: View {
                     Marker("\(index + 1). \(stop.name)", systemImage: stop.category?.symbol ?? "mappin",
                            coordinate: stop.coordinate.clLocation).tint(.orange)
                 }
-                ForEach(state.recommendations.prefix(4)) { recommendation in
+                ForEach(state.recommendations.prefix(DiscoveryTuning.maxRecommendations)) { recommendation in
                     Annotation(recommendation.place.name, coordinate: recommendation.place.coordinate.clLocation) {
                         Button { state.focusedRecommendationID = recommendation.id } label: {
                             Image(systemName: recommendation.place.category?.symbol ?? "mappin")
@@ -515,7 +533,8 @@ private struct ExploreView: View {
         case .planning: activity = "Planning journey."
         case .idle: activity = ""
         }
-        let budgetLabel = state.timeBudget.deadline == nil ? "Adventure Time" : "arrival margin"
+        let budgetLabel = state.timeBudget.deadline == nil ? "Adventure Time" :
+            (state.activeJourney ? "approximate arrival margin" : "arrival margin")
         return "Profile, \(name). \(TripFormatting.duration(remaining)) \(budgetLabel) remaining. \(activity)"
     }
 
@@ -697,7 +716,11 @@ private struct ExploreView: View {
                              },
                              onMaps: { handoffFailed = !state.openNextLeg() },
                              onSummary: { showJourney = false; showSummary = true },
-                             onActive: { showJourney = false; state.startActiveJourney(); showActive = true })
+                             onActive: {
+                                 showJourney = false
+                                 if !state.activeJourney { state.startActiveJourney() }
+                                 showActive = true
+                             })
                 .onChange(of: context.date, initial: true) { _, date in state.refreshDeadline(at: date) }
         }
         .presentationDetents([.height(220), .medium, .large], selection: $detent)
@@ -1338,7 +1361,8 @@ private struct JourneySheetView: View {
                 .font(.caption2).foregroundStyle(.secondary)
             Button("Finish or save journey", action: onSummary).font(.subheadline)
             if FeatureFlags.liveOpportunities {
-                Button("Start active journey", systemImage: "car.side.fill", action: onActive)
+                Button(state.activeJourney ? "View active journey" : "Start active journey",
+                       systemImage: "car.side.fill", action: onActive)
                     .font(.subheadline.weight(.semibold))
             }
         }

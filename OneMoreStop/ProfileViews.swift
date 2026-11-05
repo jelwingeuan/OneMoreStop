@@ -171,9 +171,15 @@ struct ProfileHubView: View {
             Text("\(route.origin.name) → \(route.destination.name)")
                 .font(.headline).lineLimit(2)
             VStack(alignment: .leading, spacing: 4) {
-                Label(TripFormatting.duration(state.profileRemainingTime(at: now)) + " Adventure Time left",
+                Label(TripFormatting.duration(state.profileRemainingTime(at: now)) +
+                      (state.timeBudget.deadline == nil ? " Adventure Time left" :
+                          (state.activeJourney ? " approximate arrival margin" : " arrival margin")),
                       systemImage: "clock")
-                Text("Routed driving ETA from start: \(TripFormatting.arrival(now.addingTimeInterval(journey.drivingDuration)))")
+                if let arrival = state.profileDrivingArrival(at: now) {
+                    Text("\(state.activeJourney ? "Approx. driving arrival" : "Driving arrival if leaving now"): \(TripFormatting.arrival(arrival))")
+                } else if state.activeJourney {
+                    Text("Driving arrival unavailable while off the planned route")
+                }
             }
             .font(.caption).foregroundStyle(.secondary)
             if !journey.stops.isEmpty {

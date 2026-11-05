@@ -54,6 +54,40 @@ private final class FakeActivityProvider: LiveActivityProviding {
 }
 
 @MainActor
+private final class SuspendedActivityProvider: LiveActivityProviding {
+    var isRunning = false
+    private(set) var startedRoutes = [UUID]()
+    private(set) var endCount = 0
+    private var resumeFirstStart: CheckedContinuation<Void, Never>?
+    private var firstStartWaiter: CheckedContinuation<Void, Never>?
+
+    func start(routeID: UUID, content: JourneyActivityAttributes.ContentState) async {
+        startedRoutes.append(routeID)
+        if startedRoutes.count == 1 {
+            await withCheckedContinuation { continuation in
+                resumeFirstStart = continuation
+                firstStartWaiter?.resume()
+                firstStartWaiter = nil
+            }
+        }
+        isRunning = true
+    }
+
+    func update(_ content: JourneyActivityAttributes.ContentState) async {}
+    func end() async { endCount += 1; isRunning = false }
+
+    func waitUntilFirstStartSuspends() async {
+        guard resumeFirstStart == nil else { return }
+        await withCheckedContinuation { firstStartWaiter = $0 }
+    }
+
+    func releaseFirstStart() {
+        resumeFirstStart?.resume()
+        resumeFirstStart = nil
+    }
+}
+
+@MainActor
 struct V4PlanningTests {
     let a = Coordinate(latitude: 3, longitude: 101)
     let b = Coordinate(latitude: 3, longitude: 101.1)
@@ -180,6 +214,78 @@ struct V4PlanningTests {
         #expect(state.opportunities.isEmpty)
     }
 
+    @Test func dismissingRecommendationsAdvancesAndClearsRadar() {
+        let origin = Place(id: "start", name: "Start", coordinate: a)
+        let destination = Place(id: "end", name: "End", coordinate: b)
+        let baseline = RouteMetrics(duration: 3_600, distance: 30_000, path: [a, b])
+        let first = Place(id: "first", name: "First coffee", coordinate: a, category: .coffee)
+        let second = Place(id: "second", name: "Second coffee", coordinate: b, category: .coffee)
+        let state = AppState()
+        state.route = RoutePlan(id: UUID(), origin: origin, destination: destination,
+                                baseline: baseline, createdAt: .now)
+        state.journey = Journey(stops: [], legs: [baseline], baseline: baseline)
+        state.recommendations = [
+            StopRecommendation(place: first, detourTime: 300, detourDistance: 500,
+                distanceFromRoute: 0, progress: 0.2, score: 90,
+                firstLeg: baseline, secondLeg: baseline),
+            StopRecommendation(place: second, detourTime: 300, detourDistance: 500,
+                distanceFromRoute: 0, progress: 0.8, score: 80,
+                firstLeg: baseline, secondLeg: baseline)
+        ]
+
+        state.refreshOpportunityPolicy()
+        #expect(state.nextOpportunity?.place.name == "First coffee")
+        state.notInterested(first)
+        #expect(state.nextOpportunity?.place.name == "Second coffee")
+        state.ignore(second)
+        #expect(state.nextOpportunity == nil)
+    }
+
+    @Test func activeDeadlineKeepsMarginAndDropsPassedPlannedVisits() {
+        let middle = Coordinate(latitude: 3, longitude: 101.05)
+        let origin = Place(id: "start", name: "Start", coordinate: a)
+        let destination = Place(id: "end", name: "End", coordinate: b)
+        let stop = Place(id: "coffee", name: "Coffee", coordinate: middle)
+        let baseline = RouteMetrics(duration: 120 * 60, distance: 100_000, path: [a, middle, b])
+        let leg = RouteMetrics(duration: 60 * 60, distance: 50_000, path: [a, middle])
+        let lastLeg = RouteMetrics(duration: 60 * 60, distance: 50_000, path: [middle, b])
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let state = AppState(liveOpportunity: FakeActivityProvider())
+        state.route = RoutePlan(id: UUID(), origin: origin, destination: destination,
+                                baseline: baseline, createdAt: now)
+        state.journey = Journey(stops: [stop], legs: [leg, lastLeg], baseline: baseline)
+        state.plannedVisitMinutes[stop.id] = 15
+        state.timeBudget = .arriveBy(now.addingTimeInterval(90 * 60))
+        state.clockNow = now
+        state.activeJourney = true
+        state.travelerProgress = 0.5
+
+        #expect(state.remainingTime == 15 * 60)
+        #expect(state.allowedExtraDriving == 15 * 60)
+        #expect(state.profileRemainingTime(at: now) == 15 * 60)
+
+        state.travelerProgress = 0.75
+        #expect(state.remainingTime == 60 * 60)
+        #expect(state.allowedExtraDriving == 60 * 60)
+    }
+
+    @Test func startingAnAlreadyActiveJourneyPreservesSessionChoices() {
+        let origin = Place(id: "start", name: "Start", coordinate: a)
+        let destination = Place(id: "end", name: "End", coordinate: b)
+        let baseline = RouteMetrics(duration: 3_600, distance: 30_000, path: [a, b])
+        let state = AppState(liveOpportunity: FakeActivityProvider())
+        state.route = RoutePlan(id: UUID(), origin: origin, destination: destination,
+                                baseline: baseline, createdAt: .now)
+        state.journey = Journey(stops: [], legs: [baseline], baseline: baseline)
+
+        state.startActiveJourney()
+        state.activeSkippedCount = 2
+        state.startActiveJourney()
+
+        #expect(state.activeJourney)
+        #expect(state.activeSkippedCount == 2)
+    }
+
     @Test func meetingFairnessCanBeOverriddenByTotalDetour() {
         let now = Date(timeIntervalSince1970: 0)
         let unfair = MeetingResult(place: Place(id: "unfair", name: "Unfair", coordinate: a),
@@ -242,12 +348,36 @@ struct V4PlanningTests {
                                 baseline: metrics, createdAt: .now)
         state.journey = Journey(stops: [], legs: [metrics], baseline: metrics)
         state.startActiveJourney()
-        try await Task.sleep(for: .milliseconds(20))
+        await state.endOrphanedLiveActivities()
         #expect(fake.startCount == 1)
         #expect(fake.latest?.destination == "D")
         state.endActiveJourney()
-        try await Task.sleep(for: .milliseconds(20))
+        await state.endOrphanedLiveActivities()
         #expect(fake.endCount >= 1)
+    }
+
+    @Test func rapidEndAndRestartCannotEndTheNewLiveActivity() async {
+        let fake = SuspendedActivityProvider()
+        let state = AppState(liveOpportunity: fake)
+        let origin = Place(id: "a", name: "A", coordinate: a)
+        let destination = Place(id: "d", name: "D", coordinate: b)
+        let metrics = RouteMetrics(duration: 3_600, distance: 10_000, path: [a, b])
+        let route = RoutePlan(id: UUID(), origin: origin, destination: destination,
+                              baseline: metrics, createdAt: .now)
+        state.route = route
+        state.journey = Journey(stops: [], legs: [metrics], baseline: metrics)
+
+        state.startActiveJourney()
+        await fake.waitUntilFirstStartSuspends()
+        state.endActiveJourney()
+        state.startActiveJourney()
+        fake.releaseFirstStart()
+        await state.endOrphanedLiveActivities()
+
+        #expect(fake.startedRoutes == [route.id, route.id])
+        #expect(fake.isRunning)
+        #expect(state.liveActivityRunning)
+        #expect(fake.endCount == 0)
     }
 
     @Test func repeatingSavedJourneyClearsActiveRouteProgress() async {

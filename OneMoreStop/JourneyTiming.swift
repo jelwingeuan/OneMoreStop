@@ -1,5 +1,31 @@
 import Foundation
 
+/// Estimates the deadline budget from the traveler's position on the selected journey.
+/// Route progress is distance based, so these values are approximate until directions
+/// are recalculated from the current location.
+struct ActiveDeadlineBudget: Equatable, Sendable {
+    let estimatedRemainingDriving: TimeInterval
+    let remainingMargin: TimeInterval
+    let allowedTotalDetour: TimeInterval
+
+    init(deadline: Date, now: Date, baselineDriving: TimeInterval,
+         journeyDriving: TimeInterval, routeProgress: Double,
+         remainingPlannedVisits: TimeInterval) {
+        let progress = routeProgress.isFinite ? min(max(routeProgress, 0), 1) : 0
+        let journeyDuration = max(0, journeyDriving)
+        estimatedRemainingDriving = journeyDuration * (1 - progress)
+
+        let rawMargin = deadline.timeIntervalSince(now) - estimatedRemainingDriving
+            - max(0, remainingPlannedVisits)
+        remainingMargin = max(0, rawMargin)
+
+        // Recommendations carry detour against the full baseline journey. Restore
+        // the current journey's already-consumed detour before comparing them.
+        let currentTotalDetour = max(0, journeyDuration - max(0, baselineDriving))
+        allowedTotalDetour = max(0, currentTotalDetour + rawMargin)
+    }
+}
+
 enum JourneyMission: String, CaseIterable, Identifiable, Sendable {
     case coffee, localFood, scenicBreak, quickPhoto, smallAdventure, quietBreak, newPlace, memorableStop
     var id: String { rawValue }

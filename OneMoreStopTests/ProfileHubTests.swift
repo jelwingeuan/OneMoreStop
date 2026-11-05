@@ -143,6 +143,47 @@ struct ProfileHubTests {
         #expect(try context.fetch(FetchDescriptor<RecentJourney>()).count == 1)
     }
 
+    @Test @MainActor func completingEditedRouteRefreshesOneSavedJourney() throws {
+        let container = try ModelContainer(for: RecentJourney.self,
+                                           configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+        let context = ModelContext(container)
+        let coordinate = Coordinate(latitude: 3, longitude: 101)
+        let origin = Place(id: "current-origin", name: "Current Location", coordinate: coordinate)
+        let destination = Place(id: "destination", name: "Finish", coordinate: coordinate)
+        let coffee = Place(id: "coffee", name: "Coffee", coordinate: coordinate, category: .coffee)
+        let park = Place(id: "park", name: "Park", coordinate: coordinate, category: .park)
+        let baseline = RouteMetrics(duration: 3_600, distance: 20_000, path: [coordinate])
+        let route = RoutePlan(id: UUID(), origin: origin, destination: destination,
+                              baseline: baseline, createdAt: .now)
+        let firstLeg = RouteMetrics(duration: 2_100, distance: 12_000, path: [coordinate])
+        let secondLeg = RouteMetrics(duration: 1_800, distance: 9_000, path: [coordinate])
+        var session = JourneyRecordSession()
+        let original = try session.record(route: route,
+                                          journey: Journey(stops: [coffee], legs: [firstLeg, secondLeg], baseline: baseline),
+                                          budgetMinutes: 20, plannedVisits: [coffee.id: 15],
+                                          saved: true, in: context)
+        let originalID = original.id
+        let originalDate = original.createdAt
+        let thirdLeg = RouteMetrics(duration: 1_200, distance: 6_000, path: [coordinate])
+        let refreshed = try session.record(route: route,
+                                           journey: Journey(stops: [coffee, park],
+                                                            legs: [firstLeg, secondLeg, thirdLeg], baseline: baseline),
+                                           budgetMinutes: 45, plannedVisits: [coffee.id: 15, park.id: 30],
+                                           saved: false, in: context)
+
+        #expect(try context.fetch(FetchDescriptor<RecentJourney>()).count == 1)
+        #expect(refreshed.id == originalID)
+        #expect(refreshed.createdAt == originalDate)
+        #expect(refreshed.saved)
+        #expect(refreshed.originWasCurrent)
+        #expect(refreshed.places.first?.coordinate == Coordinate(latitude: 0, longitude: 0))
+        #expect(refreshed.places.dropFirst(2).map(\.name) == ["Coffee", "Park"])
+        #expect(refreshed.budgetMinutes == 45)
+        #expect(refreshed.drivingDuration == 5_100)
+        #expect(refreshed.extraDuration == 1_500)
+        #expect(refreshed.plannedVisits == [coffee.id: 15, park.id: 30])
+    }
+
     @Test func photoProcessorMakesCompactSquare() async throws {
         let source = CGColorSpace(name: CGColorSpace.sRGB)!
         let context = CGContext(data: nil, width: 1_200, height: 800, bitsPerComponent: 8,

@@ -29,9 +29,10 @@ actor MapRequestGate {
 
     func acquire() async throws {
         while active >= DiscoveryTuning.maxConcurrentRequests {
+            try Task.checkCancellation()
             let id = UUID()
             await withTaskCancellationHandler {
-                await withCheckedContinuation { continuation in waiting.append((id, continuation)) }
+                await waitForSlot(id)
             } onCancel: {
                 Task { await self.cancelWaiter(id) }
             }
@@ -43,6 +44,15 @@ actor MapRequestGate {
         started += 1
         peak = max(peak, active)
         #endif
+    }
+
+    private func waitForSlot(_ id: UUID) async {
+        // Keep registration on this actor even when the cancellation handler runs elsewhere.
+        await withCheckedContinuation(isolation: self) { continuation in
+            // Cancellation can reach the actor before this waiter is registered.
+            if Task.isCancelled { continuation.resume(); return }
+            waiting.append((id, continuation))
+        }
     }
 
     func release() {

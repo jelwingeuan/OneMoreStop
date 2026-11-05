@@ -6,6 +6,7 @@ final class OneMoreStopUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments += ["-hasSeenIntroduction", "YES"]
         app.launch()
+        dismissIntroductionIfNeeded(in: app)
         XCTAssertTrue(app.staticTexts["A little time. A better drive."].waitForExistence(timeout: 15))
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Profile,")).firstMatch.tap()
         XCTAssertTrue(app.navigationBars["Profile"].waitForExistence(timeout: 5))
@@ -20,6 +21,7 @@ final class OneMoreStopUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments += ["-hasSeenIntroduction", "YES"]
         app.launch()
+        dismissIntroductionIfNeeded(in: app)
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Profile,")).firstMatch.tap()
         app.buttons["Edit profile"].tap()
         XCTAssertTrue(app.navigationBars["Edit profile"].waitForExistence(timeout: 5))
@@ -28,7 +30,8 @@ final class OneMoreStopUITests: XCTestCase {
         name.typeText(" Nur")
         let savedName = try XCTUnwrap(name.value as? String)
         app.buttons["Save"].tap()
-        XCTAssertTrue(app.staticTexts[savedName].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts[savedName.trimmingCharacters(in: .whitespacesAndNewlines)]
+            .waitForExistence(timeout: 5))
         app.buttons["Collections"].tap()
         XCTAssertTrue(app.navigationBars["Saved"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["New collection"].exists)
@@ -38,6 +41,7 @@ final class OneMoreStopUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments += ["-hasSeenIntroduction", "YES"]
         app.launch()
+        dismissIntroductionIfNeeded(in: app)
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Profile,")).firstMatch
             .press(forDuration: 0.8)
         XCTAssertTrue(app.buttons["Travel preferences"].waitForExistence(timeout: 5))
@@ -50,6 +54,7 @@ final class OneMoreStopUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments += ["-hasSeenIntroduction", "YES"]
         app.launch()
+        dismissIntroductionIfNeeded(in: app)
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Profile,")).firstMatch.tap()
         app.buttons["Edit profile"].tap()
         let firstAction = app.buttons["Choose photo"].exists ? "Choose photo" : "Replace photo"
@@ -82,6 +87,7 @@ final class OneMoreStopUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments += ["-hasSeenIntroduction", "YES"]
         app.launch()
+        dismissIntroductionIfNeeded(in: app)
         try choose("Cyberjaya", from: app.buttons["Choose starting place"].firstMatch, in: app)
         try choose("Melaka", from: app.buttons["Where are you going?"].firstMatch, in: app)
         let journey = app.staticTexts["Find your one more stop"]
@@ -116,6 +122,7 @@ final class OneMoreStopUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments += ["-hasSeenIntroduction", "YES"]
         app.launch()
+        dismissIntroductionIfNeeded(in: app)
         try choose("Cyberjaya", from: app.buttons["Choose starting place"].firstMatch, in: app)
         try choose("Melaka", from: app.buttons["Where are you going?"].firstMatch, in: app)
         guard app.staticTexts["Find your one more stop"].waitForExistence(timeout: 60) else {
@@ -134,16 +141,17 @@ final class OneMoreStopUITests: XCTestCase {
         start.tap()
         XCTAssertTrue(app.navigationBars["Active journey"].waitForExistence(timeout: 10))
         app.segmentedControls.buttons["Passenger"].tap()
-        XCTAssertTrue(app.staticTexts["Upcoming opportunities"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["What Was That?"].exists)
-        XCTAssertTrue(app.staticTexts["Detour Roulette"].exists)
-        XCTAssertTrue(app.buttons["Meet on the way"].exists)
+        XCTAssertTrue(reveal(app.staticTexts["Upcoming opportunities"], in: app))
+        XCTAssertTrue(reveal(app.buttons["What Was That?"], in: app))
+        XCTAssertTrue(reveal(app.staticTexts["Detour Roulette"], in: app))
+        XCTAssertTrue(reveal(app.buttons["Meet on the way"], in: app))
     }
 
     func testRouteOutsideMalaysia() throws {
         let app = XCUIApplication()
         app.launchArguments += ["-hasSeenIntroduction", "YES"]
         app.launch()
+        dismissIntroductionIfNeeded(in: app)
         try choose("Mountain View California", matching: "Mountain View", from: app.buttons["Choose starting place"].firstMatch, in: app)
         try choose("Santa Cruz California", matching: "Santa Cruz", from: app.buttons["Where are you going?"].firstMatch, in: app)
         if !app.staticTexts["Find your one more stop"].waitForExistence(timeout: 60) {
@@ -157,6 +165,7 @@ final class OneMoreStopUITests: XCTestCase {
         app.resetAuthorizationStatus(for: .location)
         app.launchArguments += ["-hasSeenIntroduction", "YES"]
         app.launch()
+        dismissIntroductionIfNeeded(in: app)
         app.buttons["Choose starting place"].firstMatch.tap()
         app.buttons["Current Location"].tap()
         app.alerts["Use your location?"].buttons["Continue"].tap()
@@ -174,6 +183,7 @@ final class OneMoreStopUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments += ["-hasSeenIntroduction", "YES"]
         app.launch()
+        dismissIntroductionIfNeeded(in: app)
         try choose("Cyberjaya", from: app.buttons["Choose starting place"].firstMatch, in: app)
         try choose("Central Park New York", matching: "Central Park", from: app.buttons["Where are you going?"].firstMatch, in: app)
         if !app.buttons["Try route again"].waitForExistence(timeout: 45) {
@@ -187,6 +197,7 @@ final class OneMoreStopUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments += ["-hasSeenIntroduction", "YES"]
         app.launch()
+        dismissIntroductionIfNeeded(in: app)
         app.buttons["Drive Until"].tap()
         XCTAssertTrue(app.navigationBars["Explore by time"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.switches["Return to start"].exists)
@@ -199,11 +210,27 @@ final class OneMoreStopUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments += ["-hasSeenIntroduction", "YES"]
         app.launch()
+        dismissIntroductionIfNeeded(in: app)
         app.buttons["Local group"].tap()
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Votes are saved on this device"))
             .firstMatch.waitForExistence(timeout: 5))
         if app.buttons["Create group"].exists { app.buttons["Create group"].tap() }
         XCTAssertTrue(app.staticTexts["Participants"].waitForExistence(timeout: 5))
+    }
+
+    private func dismissIntroductionIfNeeded(in app: XCUIApplication) {
+        let start = app.buttons["Start exploring"]
+        if start.waitForExistence(timeout: 5) { start.tap() }
+    }
+
+    private func reveal(_ element: XCUIElement, in app: XCUIApplication) -> Bool {
+        if element.exists { return true }
+        let scroll = app.scrollViews.firstMatch
+        for _ in 0..<5 where scroll.exists {
+            scroll.swipeUp()
+            if element.exists { return true }
+        }
+        return element.waitForExistence(timeout: 5)
     }
 
     private func choose(_ query: String, matching label: String? = nil, from button: XCUIElement, in app: XCUIApplication) throws {

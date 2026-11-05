@@ -174,7 +174,7 @@ final class AppState {
         return recommendations[surpriseIndex % recommendations.count]
     }
 
-    private let location = LocationService()
+    private let location: any CurrentLocationProviding
     let search = MapSearchService()
     private let directions = DirectionsService()
     private var discoveryTask: Task<Void, Never>?
@@ -195,7 +195,9 @@ final class AppState {
     @ObservationIgnored private var liveActivityTask: Task<Void, Never>?
     @ObservationIgnored private var liveActivityGeneration = 0
 
-    init(liveOpportunity: any LiveActivityProviding = LiveOpportunityProvider()) {
+    init(location: any CurrentLocationProviding = LocationService(),
+         liveOpportunity: any LiveActivityProviding = LiveOpportunityProvider()) {
+        self.location = location
         self.liveOpportunity = liveOpportunity
     }
     var nextOpportunity: JourneyOpportunity? { opportunities.first }
@@ -248,20 +250,25 @@ final class AppState {
     }
 
     func useCurrentLocation() async {
+        let selectedOrigin = origin
         do {
             let position = try await location.currentLocation()
+            guard origin == selectedOrigin else { return }
             let coordinate = Coordinate(position.coordinate)
             origin = Place(id: "current-origin", name: "Current Location", coordinate: coordinate)
             locationMessage = location.hasReducedAccuracy
                 ? "Approximate location is on. Choose a starting place for more precise detours."
                 : nil
             if destination != nil { calculateRoute(resetBudget: route == nil) }
-        } catch { locationMessage = error.localizedDescription }
+        } catch {
+            if origin == selectedOrigin { locationMessage = error.localizedDescription }
+        }
     }
 
     func refreshTravelerProgress() async {
         guard location.isAuthorized, let route else { return }
         if let position = try? await location.currentLocation() {
+            guard self.route?.id == route.id else { return }
             let coordinate = Coordinate(position.coordinate)
             let projection = GeoMath.routeProgress(coordinate,
                                                    path: journey?.path ?? route.baseline.path)
@@ -996,12 +1003,17 @@ final class AppState {
     func repeatJourney(_ saved: RecentJourney) async {
         let places = saved.places
         guard places.count >= 2 else { return }
+        let selectedOrigin = origin
+        let selectedDestination = destination
         if saved.originWasCurrent {
             do {
                 let position = try await location.currentLocation()
+                guard origin == selectedOrigin, destination == selectedDestination else { return }
                 origin = Place(id: "current-origin", name: "Current Location", coordinate: Coordinate(position.coordinate))
             } catch {
-                locationMessage = error.localizedDescription
+                if origin == selectedOrigin, destination == selectedDestination {
+                    locationMessage = error.localizedDescription
+                }
                 return
             }
         } else { origin = places[0] }

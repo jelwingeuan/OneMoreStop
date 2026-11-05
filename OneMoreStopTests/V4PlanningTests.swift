@@ -1,4 +1,5 @@
 import ActivityKit
+import CoreLocation
 import Foundation
 import SwiftData
 import Testing
@@ -88,9 +89,97 @@ private final class SuspendedActivityProvider: LiveActivityProviding {
 }
 
 @MainActor
+private final class SuspendedLocationProvider: CurrentLocationProviding {
+    var isAuthorized = true
+    var hasReducedAccuracy = false
+    private var pending: CheckedContinuation<CLLocation, Error>?
+    private var requestWaiter: CheckedContinuation<Void, Never>?
+
+    func currentLocation() async throws -> CLLocation {
+        try await withCheckedThrowingContinuation { continuation in
+            pending = continuation
+            requestWaiter?.resume()
+            requestWaiter = nil
+        }
+    }
+
+    func waitUntilRequested() async {
+        guard pending == nil else { return }
+        await withCheckedContinuation { requestWaiter = $0 }
+    }
+
+    func resolve(_ coordinate: Coordinate) {
+        pending?.resume(returning: CLLocation(latitude: coordinate.latitude,
+                                             longitude: coordinate.longitude))
+        pending = nil
+    }
+}
+
+@MainActor
 struct V4PlanningTests {
     let a = Coordinate(latitude: 3, longitude: 101)
     let b = Coordinate(latitude: 3, longitude: 101.1)
+
+    @Test func delayedCurrentLocationCannotReplaceManualOrigin() async {
+        let location = SuspendedLocationProvider()
+        let state = AppState(location: location)
+        let request = Task { await state.useCurrentLocation() }
+        await location.waitUntilRequested()
+
+        let manual = Place(id: "manual", name: "Manual start", coordinate: b)
+        state.setOrigin(manual)
+        location.resolve(a)
+        await request.value
+
+        #expect(state.origin == manual)
+    }
+
+    @Test func delayedProgressCannotChangeAReplacementRoute() async {
+        let location = SuspendedLocationProvider()
+        let state = AppState(location: location)
+        let origin = Place(id: "start", name: "Start", coordinate: a)
+        let destination = Place(id: "end", name: "End", coordinate: b)
+        let oldMetrics = RouteMetrics(duration: 3_600, distance: 10_000, path: [a, b])
+        state.route = RoutePlan(id: UUID(), origin: origin, destination: destination,
+                                baseline: oldMetrics, createdAt: .now)
+        state.journey = Journey(stops: [], legs: [oldMetrics], baseline: oldMetrics)
+        let request = Task { await state.refreshTravelerProgress() }
+        await location.waitUntilRequested()
+
+        let farAway = Coordinate(latitude: 4, longitude: 102)
+        let replacement = RouteMetrics(duration: 4_000, distance: 12_000, path: [farAway, b])
+        state.route = RoutePlan(id: UUID(), origin: origin, destination: destination,
+                                baseline: replacement, createdAt: .now)
+        state.journey = Journey(stops: [], legs: [replacement], baseline: replacement)
+        state.travelerProgress = 0.4
+        location.resolve(a)
+        await request.value
+
+        #expect(state.travelerProgress == 0.4)
+        #expect(state.isTravelerOnRoute)
+        #expect(state.activeMessage == nil)
+    }
+
+    @Test func delayedRepeatCannotReplaceANewDestination() async {
+        let location = SuspendedLocationProvider()
+        let state = AppState(location: location)
+        let savedOrigin = Place(id: "current-origin", name: "Current Location", coordinate: a)
+        let savedDestination = Place(id: "saved", name: "Saved destination", coordinate: b)
+        let saved = RecentJourney(origin: savedOrigin, destination: savedDestination,
+                                  stops: [], budgetMinutes: 20, drivingDuration: 3_600,
+                                  extraDuration: 0)
+        let request = Task { await state.repeatJourney(saved) }
+        await location.waitUntilRequested()
+
+        let manualDestination = Place(id: "manual", name: "New destination", coordinate: a)
+        state.setDestination(manualDestination)
+        location.resolve(a)
+        await request.value
+
+        #expect(state.origin == nil)
+        #expect(state.destination == manualDestination)
+        #expect(state.route == nil)
+    }
 
     @Test func returnPlaceRequiresRelevantDirectionAndCurrentCorridor() {
         let origin = Place(id: "old-start", name: "Old start", coordinate: a)

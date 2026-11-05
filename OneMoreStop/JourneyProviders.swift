@@ -1,4 +1,12 @@
+import CoreLocation
 import Foundation
+
+@MainActor
+protocol CurrentLocationProviding {
+    var isAuthorized: Bool { get }
+    var hasReducedAccuracy: Bool { get }
+    func currentLocation() async throws -> CLLocation
+}
 
 @MainActor
 protocol DrivingDirectionsProviding {
@@ -12,3 +20,4 @@ protocol PlaceDiscoveryProviding {
 
 extension DirectionsService: DrivingDirectionsProviding {}
 extension MapSearchService: PlaceDiscoveryProviding {}
+extension LocationService: CurrentLocationProviding {}

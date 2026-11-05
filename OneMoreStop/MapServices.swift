@@ -70,8 +70,8 @@ actor MapRequestGate {
 
 @MainActor
 final class LocationService: NSObject, @MainActor CLLocationManagerDelegate {
-    private let manager = CLLocationManager()
-    private var continuation: CheckedContinuation<CLLocation, Error>?
+    private var manager = CLLocationManager()
+    private var request: (id: UUID, continuation: CheckedContinuation<CLLocation, Error>, started: Bool)?
 
     override init() {
         super.init()
@@ -86,42 +86,80 @@ final class LocationService: NSObject, @MainActor CLLocationManagerDelegate {
     var hasReducedAccuracy: Bool { manager.accuracyAuthorization == .reducedAccuracy }
 
     func currentLocation() async throws -> CLLocation {
-        guard continuation == nil else { throw LocationError.alreadyLocating }
+        guard request == nil else { throw LocationError.alreadyLocating }
         if manager.authorizationStatus != .notDetermined && !isAuthorized { throw LocationError.permissionDenied }
+        let requestID = UUID()
         return try await withTaskCancellationHandler {
             try Task.checkCancellation()
-            return try await withCheckedThrowingContinuation { continuation in
-                self.continuation = continuation
-                if isAuthorized { manager.requestLocation() }
-                else { manager.requestWhenInUseAuthorization() }
-            }
+            return try await beginRequest(requestID)
         } onCancel: {
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                manager.stopUpdatingLocation()
-                continuation?.resume(throwing: CancellationError())
-                continuation = nil
-            }
+            Task { @MainActor [weak self] in self?.cancelRequest(requestID) }
         }
     }
 
+    private func beginRequest(_ id: UUID) async throws -> CLLocation {
+        try await withCheckedThrowingContinuation(isolation: MainActor.shared) { continuation in
+            // The cancellation handler may run before this continuation is registered.
+            guard !Task.isCancelled else {
+                continuation.resume(throwing: CancellationError())
+                return
+            }
+            guard request == nil else {
+                continuation.resume(throwing: LocationError.alreadyLocating)
+                return
+            }
+            guard manager.authorizationStatus == .notDetermined || isAuthorized else {
+                continuation.resume(throwing: LocationError.permissionDenied)
+                return
+            }
+            request = (id, continuation, false)
+            if isAuthorized { requestLocationIfAuthorized() }
+            else { manager.requestWhenInUseAuthorization() }
+        }
+    }
+
+    private func requestLocationIfAuthorized() {
+        guard isAuthorized, var current = request, !current.started else { return }
+        current.started = true
+        request = current
+        manager.requestLocation()
+    }
+
+    private func cancelRequest(_ id: UUID) {
+        guard request?.id == id else { return }
+        finishRequest(.failure(CancellationError()))
+        // A one-shot CoreLocation callback may still arrive after cancellation.
+        // Retire its manager so it cannot complete the next request.
+        manager.delegate = nil
+        manager.stopUpdatingLocation()
+        manager = CLLocationManager()
+        manager.desiredAccuracy = kCLLocationAccuracyBest
+        manager.delegate = self
+    }
+
+    private func finishRequest(_ result: Result<CLLocation, Error>) {
+        guard let current = request else { return }
+        request = nil
+        current.continuation.resume(with: result)
+    }
+
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
-        if isAuthorized, continuation != nil { manager.requestLocation() }
+        guard manager === self.manager else { return }
+        if isAuthorized { requestLocationIfAuthorized() }
         else if manager.authorizationStatus == .denied || manager.authorizationStatus == .restricted {
-            continuation?.resume(throwing: LocationError.permissionDenied)
-            continuation = nil
+            finishRequest(.failure(LocationError.permissionDenied))
         }
     }
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
-        if let location = locations.last { continuation?.resume(returning: location) }
-        else { continuation?.resume(throwing: LocationError.unavailable) }
-        continuation = nil
+        guard manager === self.manager else { return }
+        if let location = locations.last { finishRequest(.success(location)) }
+        else { finishRequest(.failure(LocationError.unavailable)) }
     }
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
-        continuation?.resume(throwing: LocationError.unavailable)
-        continuation = nil
+        guard manager === self.manager else { return }
+        finishRequest(.failure(LocationError.unavailable))
     }
 
     enum LocationError: LocalizedError {

@@ -1,16 +1,30 @@
 import SwiftUI
 
+private struct SpontaneousSearchInput: Equatable {
+    let kind: SpontaneousKind
+    let minutes: Int
+    let mode: DiscoveryMode
+    let returnsHome: Bool
+    let origin: Place?
+}
+
 struct SpontaneousPlannerView: View {
     @Bindable var state: AppState
     let initialKind: SpontaneousKind
     let chooseOrigin: () -> Void
     let openMaps: () -> Void
+    let continueMaps: () -> Void
 
     @State private var kind: SpontaneousKind = .driveUntil
     @State private var minutes = 60
     @State private var mode: DiscoveryMode = .scenic
     @State private var returnsHome = false
     @Environment(\.dismiss) private var dismiss
+
+    private var searchInput: SpontaneousSearchInput {
+        SpontaneousSearchInput(kind: kind, minutes: minutes, mode: mode,
+                               returnsHome: kind == .escape || returnsHome, origin: state.origin)
+    }
 
     var body: some View {
         NavigationStack {
@@ -31,11 +45,13 @@ struct SpontaneousPlannerView: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Picker("Driving time", selection: $minutes) {
-                        ForEach(kind == .escape ? [60, 90, 120, 180, 240] : [30, 45, 60, 90, 120], id: \.self) {
+                        ForEach(kind.availableMinutes, id: \.self) {
                             Text("\($0) min").tag($0)
                         }
                     }
                     .pickerStyle(.menu)
+                    .accessibilityIdentifier("spontaneousDrivingTimePicker")
+                    .accessibilityValue("\(minutes) min")
                     Picker("Find", selection: $mode) {
                         ForEach([DiscoveryMode.scenic, .nature, .eat, .coffee, .thingsToDo, .explore], id: \.self) {
                             Text($0.title).tag($0)
@@ -49,7 +65,7 @@ struct SpontaneousPlannerView: View {
                         Button("Choose a starting place", action: chooseOrigin)
                     }
                     Button {
-                        state.findSpontaneous(kind: kind, minutes: minutes, mode: mode,
+                        state.findSpontaneous(kind: kind, minutes: kind.validMinutes(near: minutes), mode: mode,
                                               returnsHome: kind == .escape || returnsHome)
                     } label: {
                         Label("Find routed outings", systemImage: "magnifyingglass")
@@ -81,12 +97,17 @@ struct SpontaneousPlannerView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Selected outing: \(plan.stops.map(\.name).joined(separator: " → "))")
                                 .font(.headline)
+                            if let target = state.spontaneousCurrentLegTarget {
+                                Text("Next: \(target.name)").font(.subheadline)
+                            }
                             Text("Apple Maps opens one driving leg at a time. Return here to continue.")
                                 .font(.caption).foregroundStyle(.secondary)
-                            Button(state.spontaneousOpenedLegCount == 0 ? "Open in Apple Maps" : "Continue to next leg",
+                            Button(state.spontaneousLegOpened ? "Reopen current leg in Apple Maps" : "Open in Apple Maps",
                                    action: openMaps)
                                 .buttonStyle(.borderedProminent)
-                                .disabled(state.spontaneousOpenedLegCount >= plan.legs.count)
+                            if state.canContinueSpontaneousLeg {
+                                Button("Continue to next leg", action: continueMaps)
+                            }
                         }
                     }
                 }
@@ -98,7 +119,9 @@ struct SpontaneousPlannerView: View {
         }
         .onAppear { kind = initialKind; if initialKind == .escape { returnsHome = true } }
         .onChange(of: kind) { _, value in
+            minutes = value.validMinutes(near: minutes)
             if value == .escape { returnsHome = true }
         }
+        .onChange(of: searchInput) { _, _ in state.clearSpontaneousSearch() }
     }
 }

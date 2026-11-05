@@ -4,6 +4,7 @@ import SwiftData
 struct ActiveJourneyView: View {
     @Bindable var state: AppState
     let openMaps: () -> Void
+    let continueMaps: () -> Void
     let onComplete: () -> Bool
     let onAddOpportunity: (StopRecommendation) -> Void
     let onAddChain: (StopCombination) -> Void
@@ -27,7 +28,7 @@ struct ActiveJourneyView: View {
                     if let route = state.route, let journey = state.journey {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Next").font(.subheadline).foregroundStyle(.secondary)
-                            Text(nextPlace(route: route, journey: journey).name)
+                            Text(state.currentLegTarget?.name ?? route.destination.name)
                                 .font(.largeTitle.bold())
                                 .minimumScaleFactor(0.7)
                             if let arrival = state.activeDrivingArrival {
@@ -60,14 +61,18 @@ struct ActiveJourneyView: View {
                         Button {
                             openMaps()
                         } label: {
-                            Label(state.openedLegCount == 0 ? "Open next leg in Apple Maps" : "Continue to next stop",
+                            Label(state.currentLegOpened ? "Reopen current leg in Apple Maps" : "Open current leg in Apple Maps",
                                   systemImage: "arrow.triangle.turn.up.right.diamond.fill")
                                 .frame(maxWidth: .infinity, minHeight: 52)
                         }
                         .buttonStyle(.borderedProminent)
                         .tint(.orange)
-                        .disabled(state.openedLegCount >= journey.legs.count)
-                        Text("Apple Maps handles directions one leg at a time. Return here to continue.")
+                        .disabled(state.currentLegTarget == nil)
+                        if state.canContinueToNextLeg {
+                            Button("Continue to next stop", action: continueMaps)
+                                .buttonStyle(.bordered)
+                        }
+                        Text("Apple Maps handles directions one leg at a time. Continue here after reaching the current stop.")
                             .font(.caption).foregroundStyle(.secondary)
                         Button("Complete journey", systemImage: "checkmark.circle") {
                             if onComplete() {
@@ -277,10 +282,6 @@ struct ActiveJourneyView: View {
         .padding(.top, 8)
     }
 
-    private func nextPlace(route: RoutePlan, journey: Journey) -> Place {
-        let endpoints = journey.stops + [route.destination]
-        return endpoints[min(state.openedLegCount, endpoints.count - 1)]
-    }
 }
 
 private struct PassengerDiscoveryControls: View {

@@ -6,6 +6,13 @@ private struct MeetingSearchSlot: Identifiable {
     var id: String { "\(participantID)-\(destination)" }
 }
 
+private struct MeetingSearchInput: Equatable {
+    let routeID: UUID
+    let people: [MeetingParticipant]
+    let sharedDestination: Bool
+    let minimizeTotal: Bool
+}
+
 struct MeetingPlannerView: View {
     let search: MapSearchService
     let route: RoutePlan
@@ -17,9 +24,11 @@ struct MeetingPlannerView: View {
     @State private var minimizeTotal = false
     @State private var searchSlot: MeetingSearchSlot?
     @State private var results = [MeetingResult]()
+    @State private var resultInput: MeetingSearchInput?
     @State private var busy = false
     @State private var message: String?
     @State private var lookupTask: Task<Void, Never>?
+    @State private var lookupID = UUID()
 
     init(search: MapSearchService, route: RoutePlan, onAdd: @escaping (Place) -> Void) {
         self.search = search
@@ -61,7 +70,6 @@ struct MeetingPlannerView: View {
                             if people.count > 2 {
                                 Button("Remove \(person.name)", role: .destructive) {
                                     people.removeAll { $0.id == person.id }
-                                    results = []
                                 }
                             }
                         }
@@ -87,7 +95,7 @@ struct MeetingPlannerView: View {
                     if busy { ProgressView("Routing every participant…") }
                     if let message { Text(message).font(.caption).foregroundStyle(.secondary) }
                 }
-                if !results.isEmpty {
+                if resultInput == currentInput, !results.isEmpty {
                     Section("Routed meeting options") {
                         ForEach(results) { result in
                             VStack(alignment: .leading, spacing: 6) {
@@ -119,10 +127,29 @@ struct MeetingPlannerView: View {
                     if slot.destination { person.destination = place }
                     else { person.origin = place }
                 }
-                results = []
             } onCurrentLocation: { }
         }
+        .onChange(of: currentInput) { _, _ in invalidateResults() }
+        .onChange(of: route.id) { _, _ in
+            people = [MeetingParticipant(name: "You", origin: route.origin, destination: route.destination),
+                      MeetingParticipant(name: "Friend", destination: route.destination)]
+        }
         .onDisappear { lookupTask?.cancel() }
+    }
+
+    private var currentInput: MeetingSearchInput {
+        MeetingSearchInput(routeID: route.id, people: people,
+                           sharedDestination: sharedDestination, minimizeTotal: minimizeTotal)
+    }
+
+    private func invalidateResults() {
+        lookupTask?.cancel()
+        lookupTask = nil
+        lookupID = UUID()
+        results = []
+        resultInput = nil
+        busy = false
+        message = nil
     }
 
     private var canSearch: Bool {
@@ -143,8 +170,13 @@ struct MeetingPlannerView: View {
 
     private func find() {
         lookupTask?.cancel()
+        let requestID = UUID()
+        let input = currentInput
+        let prioritizeTotal = minimizeTotal
+        lookupID = requestID
         busy = true
         results = []
+        resultInput = nil
         message = nil
         let participants = people.map { person -> MeetingParticipant in
             var copy = person
@@ -154,13 +186,17 @@ struct MeetingPlannerView: View {
         lookupTask = Task {
             do {
                 let options = try await MeetingPlannerService(directions: DirectionsService(), search: search)
-                    .find(participants: participants, minimizeTotal: minimizeTotal)
-                guard !Task.isCancelled else { return }
+                    .find(participants: participants, minimizeTotal: prioritizeTotal)
+                guard !Task.isCancelled, lookupID == requestID, currentInput == input else { return }
                 results = options
+                resultInput = input
                 message = options.isEmpty ? "No meeting place was verified near all these routes. Try different endpoints." : nil
             } catch is CancellationError { }
-            catch { message = "Couldn’t check all routes. Check the endpoints and connection, then retry." }
-            busy = false
+            catch {
+                guard !Task.isCancelled, lookupID == requestID, currentInput == input else { return }
+                message = "Couldn’t check all routes. Check the endpoints and connection, then retry."
+            }
+            if lookupID == requestID { busy = false }
         }
     }
 

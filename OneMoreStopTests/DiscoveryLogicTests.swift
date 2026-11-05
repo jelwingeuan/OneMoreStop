@@ -265,6 +265,9 @@ struct DiscoveryLogicTests {
         #expect(!SpontaneousPlanning.fits(5 * 60, targetMinutes: 60))
         #expect(SpontaneousPlanning.searchRadius(minutes: 120, returnsHome: true) <
                 SpontaneousPlanning.searchRadius(minutes: 120, returnsHome: false))
+        #expect(SpontaneousKind.escape.validMinutes(near: 30) == 60)
+        #expect(SpontaneousKind.driveUntil.validMinutes(near: 240) == 120)
+        #expect(SpontaneousKind.escape.validMinutes(near: 90) == 90)
     }
 
     @Test func opportunityCoverageCountsOnlyNearbyFoundPlaces() {
@@ -392,6 +395,31 @@ struct DiscoveryLogicTests {
         #expect(plans.first?.stops.map(\.id) == ["park", "cafe"])
         #expect(plans.first?.legs.count == 3)
         #expect(abs((plans.first?.drivingDuration ?? 0) - 60 * 60) < 0.01)
+    }
+
+    @Test @MainActor func discoveryCacheKeepsDistinctNearbySearchCenters() async throws {
+        let first = Coordinate(latitude: 3.9951, longitude: 101.9951)
+        let second = Coordinate(latitude: 4.0049, longitude: 102.0049)
+        let nearby = Place(id: "near-second", name: "Cafe", coordinate:
+            Coordinate(latitude: second.latitude, longitude: 102.0211), category: .coffee)
+        let radius = DiscoveryTuning.searchRadius(for: 5)
+        #expect(GeoMath.distance(first, second) > 1_500)
+        #expect(GeoMath.distance(second, nearby.coordinate) < radius)
+        #expect(GeoMath.distance(first, nearby.coordinate) > radius)
+
+        var searchedCenters = [Coordinate]()
+        let search = MapSearchService(discoveryRequest: { center, _, _ in
+            searchedCenters.append(center)
+            return center == second ? [nearby] : []
+        })
+        let firstResults = try await search.discover(around: first, radius: radius, category: .coffee)
+        let secondResults = try await search.discover(around: second, radius: radius, category: .coffee)
+        let cachedResults = try await search.discover(around: second, radius: radius, category: .coffee)
+
+        #expect(firstResults.isEmpty)
+        #expect(secondResults.map(\.id) == [nearby.id])
+        #expect(cachedResults.map(\.id) == [nearby.id])
+        #expect(searchedCenters == [first, second])
     }
 
     @Test func globalMapGateCancelsAQueuedRequest() async throws {

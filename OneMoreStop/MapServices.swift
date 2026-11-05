@@ -174,6 +174,12 @@ final class LocationService: NSObject, @MainActor CLLocationManagerDelegate {
     }
 }
 
+private struct DiscoverySearchKey: Hashable {
+    let center: Coordinate
+    let radius: Double
+    let category: StopCategory
+}
+
 @MainActor
 final class MapSearchService: NSObject, @MainActor MKLocalSearchCompleterDelegate {
     private let completer = MKLocalSearchCompleter()
@@ -184,10 +190,12 @@ final class MapSearchService: NSObject, @MainActor MKLocalSearchCompleterDelegat
     private var latestSuggestionQuery = ""
     private var latestSuggestionCoordinate: Coordinate?
     private var active: [UUID: MKLocalSearch] = [:]
-    private var discoveryCache: [String: ([Place], Date)] = [:]
-    private var discoveryInflight: [String: (UUID, Task<[Place], Error>)] = [:]
+    private var discoveryCache: [DiscoverySearchKey: ([Place], Date)] = [:]
+    private var discoveryInflight: [DiscoverySearchKey: (UUID, Task<[Place], Error>)] = [:]
+    private let discoveryRequest: (@MainActor (Coordinate, Double, StopCategory) async throws -> [Place])?
 
-    override init() {
+    init(discoveryRequest: (@MainActor (Coordinate, Double, StopCategory) async throws -> [Place])? = nil) {
+        self.discoveryRequest = discoveryRequest
         super.init()
         completer.delegate = self
         completer.resultTypes = [.address, .pointOfInterest]
@@ -253,7 +261,7 @@ final class MapSearchService: NSObject, @MainActor MKLocalSearchCompleterDelegat
     }
 
     func discover(around center: Coordinate, radius: Double, category: StopCategory) async throws -> [Place] {
-        let key = "\(Int((center.latitude * 100).rounded())):\(Int((center.longitude * 100).rounded())):\(Int(radius)):\(category.rawValue)"
+        let key = DiscoverySearchKey(center: center, radius: radius, category: category)
         if let cached = discoveryCache[key], Date().timeIntervalSince(cached.1) < DiscoveryTuning.cacheLifetime {
             #if DEBUG
             await MapRequestGate.shared.recordCacheHit()
@@ -272,6 +280,7 @@ final class MapSearchService: NSObject, @MainActor MKLocalSearchCompleterDelegat
     }
 
     private func performDiscovery(around center: Coordinate, radius: Double, category: StopCategory) async throws -> [Place] {
+        if let discoveryRequest { return try await discoveryRequest(center, radius, category) }
         let response: MKLocalSearch.Response
         if let structured = category.structuredCategory {
             let request = MKLocalPointsOfInterestRequest(center: center.clLocation, radius: radius)

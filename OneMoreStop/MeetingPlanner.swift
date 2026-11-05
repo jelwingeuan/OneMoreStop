@@ -1,6 +1,6 @@
 import Foundation
 
-struct MeetingParticipant: Identifiable, Sendable {
+struct MeetingParticipant: Equatable, Identifiable, Sendable {
     let id: UUID
     var name: String
     var origin: Place?

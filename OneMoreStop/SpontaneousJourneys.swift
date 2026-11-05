@@ -5,6 +5,12 @@ enum SpontaneousKind: String, CaseIterable, Identifiable, Sendable {
     case driveUntil, escape
     var id: String { rawValue }
     var title: String { self == .driveUntil ? "Drive Until" : "Escape Mode" }
+    var availableMinutes: [Int] {
+        self == .driveUntil ? [30, 45, 60, 90, 120] : [60, 90, 120, 180, 240]
+    }
+    func validMinutes(near selected: Int) -> Int {
+        availableMinutes.min { abs($0 - selected) < abs($1 - selected) } ?? 60
+    }
 }
 
 struct SpontaneousPlan: Identifiable, Sendable {

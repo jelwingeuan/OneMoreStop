@@ -1,6 +1,7 @@
 import ActivityKit
 import CoreLocation
 import Foundation
+import MapKit
 import SwiftData
 import Testing
 @testable import OneMoreStop
@@ -52,6 +53,17 @@ private final class FakeActivityProvider: LiveActivityProviding {
     }
     func update(_ content: JourneyActivityAttributes.ContentState) async { latest = content }
     func end() async { endCount += 1 }
+}
+
+@MainActor
+private final class FakeJourneyMapsLauncher: JourneyMapsLaunching {
+    var shouldOpen = true
+    private(set) var destinations = [String]()
+
+    func openDirections(from source: MKMapItem, to destination: MKMapItem) -> Bool {
+        destinations.append(destination.name ?? "")
+        return shouldOpen
+    }
 }
 
 @MainActor
@@ -132,6 +144,35 @@ struct V4PlanningTests {
         await request.value
 
         #expect(state.origin == manual)
+    }
+
+    @Test func changingOriginClearsSpontaneousHandoff() async {
+        let location = SuspendedLocationProvider()
+        let maps = FakeJourneyMapsLauncher()
+        let state = AppState(location: location, liveOpportunity: FakeActivityProvider(),
+                             journeyMapsLauncher: maps)
+        let origin = Place(id: "start", name: "Start", coordinate: a)
+        let outing = Place(id: "outing", name: "Outing", coordinate: b)
+        let leg = RouteMetrics(duration: 1_800, distance: 5_000, path: [a, b])
+        let plan = SpontaneousPlan(origin: origin, place: outing, legs: [leg],
+                                   returnsHome: false, targetMinutes: 30, kind: .driveUntil)
+
+        state.selectSpontaneous(plan)
+        #expect(state.openSpontaneousCurrentLeg())
+        state.setOrigin(Place(id: "manual", name: "Manual", coordinate: b))
+        #expect(state.spontaneousPlan == nil)
+        #expect(state.spontaneousCurrentLegTarget == nil)
+        #expect(!state.spontaneousLegOpened)
+
+        state.selectSpontaneous(plan)
+        #expect(state.openSpontaneousCurrentLeg())
+        let request = Task { await state.useCurrentLocation() }
+        await location.waitUntilRequested()
+        location.resolve(a)
+        await request.value
+        #expect(state.spontaneousPlan == nil)
+        #expect(state.spontaneousCurrentLegTarget == nil)
+        #expect(!state.spontaneousLegOpened)
     }
 
     @Test func delayedProgressCannotChangeAReplacementRoute() async {
@@ -373,6 +414,94 @@ struct V4PlanningTests {
 
         #expect(state.activeJourney)
         #expect(state.activeSkippedCount == 2)
+    }
+
+    @Test func directJourneyCanReopenMapsAfterStartingActiveMode() {
+        let maps = FakeJourneyMapsLauncher()
+        let state = AppState(liveOpportunity: FakeActivityProvider(), journeyMapsLauncher: maps)
+        let origin = Place(id: "start", name: "Start", coordinate: a)
+        let destination = Place(id: "end", name: "End", coordinate: b)
+        let metrics = RouteMetrics(duration: 3_600, distance: 10_000, path: [a, b])
+        state.route = RoutePlan(id: UUID(), origin: origin, destination: destination,
+                                baseline: metrics, createdAt: .now)
+        state.journey = Journey(stops: [], legs: [metrics], baseline: metrics)
+
+        #expect(state.openCurrentLeg())
+        state.startActiveJourney()
+        #expect(state.openCurrentLeg())
+
+        #expect(maps.destinations == ["End", "End"])
+        #expect(state.currentLegIndex == 0)
+        #expect(state.currentLegTarget?.id == destination.id)
+        #expect(state.currentLegOpened)
+        #expect(!state.canContinueToNextLeg)
+    }
+
+    @Test func nextStopChangesOnlyAfterExplicitContinuation() {
+        let maps = FakeJourneyMapsLauncher()
+        let state = AppState(liveOpportunity: FakeActivityProvider(), journeyMapsLauncher: maps)
+        let origin = Place(id: "start", name: "Start", coordinate: a)
+        let stop = Place(id: "coffee", name: "Coffee", coordinate: Coordinate(latitude: 3, longitude: 101.05))
+        let destination = Place(id: "end", name: "End", coordinate: b)
+        let firstLeg = RouteMetrics(duration: 1_800, distance: 5_000, path: [a, stop.coordinate])
+        let secondLeg = RouteMetrics(duration: 1_800, distance: 5_000, path: [stop.coordinate, b])
+        let baseline = RouteMetrics(duration: 3_600, distance: 10_000, path: [a, b])
+        state.route = RoutePlan(id: UUID(), origin: origin, destination: destination,
+                                baseline: baseline, createdAt: .now)
+        state.journey = Journey(stops: [stop], legs: [firstLeg, secondLeg], baseline: baseline)
+
+        #expect(!state.continueToNextLeg())
+        maps.shouldOpen = false
+        #expect(!state.openCurrentLeg())
+        #expect(!state.currentLegOpened)
+        maps.shouldOpen = true
+        #expect(state.openCurrentLeg())
+        #expect(state.openCurrentLeg())
+        #expect(maps.destinations == ["Coffee", "Coffee", "Coffee"])
+        #expect(state.currentLegTarget?.id == stop.id)
+
+        maps.shouldOpen = false
+        #expect(!state.continueToNextLeg())
+        #expect(state.currentLegTarget?.id == stop.id)
+        #expect(state.currentLegOpened)
+        maps.shouldOpen = true
+        #expect(state.continueToNextLeg())
+        #expect(state.currentLegTarget?.id == destination.id)
+        #expect(state.currentLegOpened)
+        #expect(maps.destinations == ["Coffee", "Coffee", "Coffee", "End", "End"])
+        #expect(!state.canContinueToNextLeg)
+    }
+
+    @Test func spontaneousOutingCanReopenCurrentLegAndContinueExplicitly() {
+        let maps = FakeJourneyMapsLauncher()
+        let state = AppState(liveOpportunity: FakeActivityProvider(), journeyMapsLauncher: maps)
+        let origin = Place(id: "start", name: "Start", coordinate: a)
+        let outing = Place(id: "outing", name: "Outing", coordinate: b)
+        let outbound = RouteMetrics(duration: 1_800, distance: 5_000, path: [a, b])
+        let inbound = RouteMetrics(duration: 1_800, distance: 5_000, path: [b, a])
+        state.selectSpontaneous(SpontaneousPlan(origin: origin, place: outing, legs: [outbound],
+                                                returnsHome: false, targetMinutes: 30, kind: .driveUntil))
+
+        #expect(state.openSpontaneousCurrentLeg())
+        #expect(state.openSpontaneousCurrentLeg())
+        #expect(maps.destinations == ["Outing", "Outing"])
+        #expect(state.spontaneousLegIndex == 0)
+        #expect(!state.canContinueSpontaneousLeg)
+
+        state.selectSpontaneous(SpontaneousPlan(origin: origin, place: outing, legs: [outbound, inbound],
+                                                returnsHome: true, targetMinutes: 60, kind: .escape))
+        #expect(!state.continueSpontaneousLeg())
+        #expect(state.openSpontaneousCurrentLeg())
+        #expect(state.spontaneousCurrentLegTarget?.id == outing.id)
+        maps.shouldOpen = false
+        #expect(!state.continueSpontaneousLeg())
+        #expect(state.spontaneousCurrentLegTarget?.id == outing.id)
+        #expect(state.spontaneousLegOpened)
+        maps.shouldOpen = true
+        #expect(state.continueSpontaneousLeg())
+        #expect(state.spontaneousCurrentLegTarget?.id == origin.id)
+        #expect(state.spontaneousLegOpened)
+        #expect(maps.destinations == ["Outing", "Outing", "Outing", "Start", "Start"])
     }
 
     @Test func meetingFairnessCanBeOverriddenByTotalDetour() {

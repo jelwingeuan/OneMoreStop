@@ -3,6 +3,18 @@ import MapKit
 import Observation
 import SwiftUI
 
+@MainActor
+protocol JourneyMapsLaunching {
+    func openDirections(from source: MKMapItem, to destination: MKMapItem) -> Bool
+}
+
+struct SystemJourneyMapsLauncher: JourneyMapsLaunching {
+    func openDirections(from source: MKMapItem, to destination: MKMapItem) -> Bool {
+        MKMapItem.openMaps(with: [source, destination],
+                           launchOptions: [MKLaunchOptionsDirectionsModeKey: MKLaunchOptionsDirectionsModeDriving])
+    }
+}
+
 @MainActor @Observable
 final class AppState {
     var origin: Place?
@@ -64,14 +76,16 @@ final class AppState {
     var locationMessage: String?
     var journeyMessage: String?
     var journeyBusy = false
-    var openedLegCount = 0
+    var currentLegIndex = 0
+    var currentLegOpened = false
     var surpriseIndex = 0
     var showSurpriseAlternatives = false
     var spontaneousSuggestions = [SpontaneousPlan]()
     var spontaneousPlan: SpontaneousPlan?
     var spontaneousBusy = false
     var spontaneousMessage: String?
-    var spontaneousOpenedLegCount = 0
+    var spontaneousLegIndex = 0
+    var spontaneousLegOpened = false
     var activeJourney = false
     var liveActivityRunning = false
     var activeMessage: String?
@@ -175,6 +189,7 @@ final class AppState {
     }
 
     private let location: any CurrentLocationProviding
+    @ObservationIgnored private let journeyMapsLauncher: any JourneyMapsLaunching
     let search = MapSearchService()
     private let directions = DirectionsService()
     private var discoveryTask: Task<Void, Never>?
@@ -196,9 +211,11 @@ final class AppState {
     @ObservationIgnored private var liveActivityGeneration = 0
 
     init(location: any CurrentLocationProviding = LocationService(),
-         liveOpportunity: any LiveActivityProviding = LiveOpportunityProvider()) {
+         liveOpportunity: any LiveActivityProviding = LiveOpportunityProvider(),
+         journeyMapsLauncher: any JourneyMapsLaunching = SystemJourneyMapsLauncher()) {
         self.location = location
         self.liveOpportunity = liveOpportunity
+        self.journeyMapsLauncher = journeyMapsLauncher
     }
     var nextOpportunity: JourneyOpportunity? { opportunities.first }
     var driverOpportunity: DriverOpportunitySnapshot? { DriverOpportunitySnapshot(nextOpportunity) }
@@ -256,6 +273,7 @@ final class AppState {
             guard origin == selectedOrigin else { return }
             let coordinate = Coordinate(position.coordinate)
             origin = Place(id: "current-origin", name: "Current Location", coordinate: coordinate)
+            if origin != selectedOrigin { clearSpontaneousSearch() }
             locationMessage = location.hasReducedAccuracy
                 ? "Approximate location is on. Choose a starting place for more precise detours."
                 : nil
@@ -399,7 +417,9 @@ final class AppState {
     }
 
     func setOrigin(_ place: Place) {
+        let changed = origin != place
         origin = place
+        if changed { clearSpontaneousSearch() }
         locationMessage = nil
         if destination != nil { calculateRoute(resetBudget: route == nil) }
     }
@@ -434,7 +454,7 @@ final class AppState {
         routeComparisonBusy = false
         journey = nil
         plannedVisitMinutes = [:]
-        openedLegCount = 0
+        resetJourneyLegHandoff()
         cameraWasMovedByUser = false
         recommendations = []
         opportunities = []
@@ -549,6 +569,7 @@ final class AppState {
         if case .arriveBy = timeBudget { deadlineOriginalAllowance = allowedExtraDriving }
         selectedRouteIndex = index
         journey = Journey(stops: [], legs: [selected], baseline: selected)
+        resetJourneyLegHandoff()
         travelerProgress = 0
         isTravelerOnRoute = true
         if !cameraWasMovedByUser { fitCamera(to: selected.path) }
@@ -907,7 +928,7 @@ final class AppState {
         self.journey = updated
         radar.accept(current.id)
         opportunities = radar.queue
-        openedLegCount = 0
+        resetJourneyLegHandoff()
         focusedRecommendationID = current.id
         journeyMessage = nil
         discover()
@@ -924,7 +945,7 @@ final class AppState {
         radar.accept(combination.first.id)
         radar.accept(combination.second.id)
         opportunities = radar.queue
-        openedLegCount = 0
+        resetJourneyLegHandoff()
         journeyMessage = nil
         discover()
         return true
@@ -987,7 +1008,7 @@ final class AppState {
                 }
                 journey = updated
                 plannedVisitMinutes = retainedVisits
-                openedLegCount = 0
+                resetJourneyLegHandoff()
                 journeyBusy = false
                 discover()
             } catch is CancellationError {
@@ -1031,9 +1052,9 @@ final class AppState {
         isTravelerOnRoute = true
         timeMachinePreview = nil
         resetRouteComparison()
-        spontaneousPlan = nil
+        clearSpontaneousSearch()
         recommendations = []
-        openedLegCount = 0
+        resetJourneyLegHandoff()
         phase = .findingRoute
         routeTask = Task { [weak self] in
             guard let self else { return }
@@ -1075,16 +1096,24 @@ final class AppState {
         cameraWasMovedByUser = false
     }
 
+    func clearSpontaneousSearch() {
+        spontaneousTask?.cancel()
+        spontaneousTask = nil
+        spontaneousSuggestions = []
+        spontaneousPlan = nil
+        spontaneousMessage = nil
+        spontaneousBusy = false
+        spontaneousLegIndex = 0
+        spontaneousLegOpened = false
+    }
+
     func findSpontaneous(kind: SpontaneousKind, minutes: Int, mode: DiscoveryMode, returnsHome: Bool) {
+        clearSpontaneousSearch()
         guard let origin else {
             spontaneousMessage = "Choose a starting place first."
             return
         }
-        spontaneousTask?.cancel()
-        spontaneousSuggestions = []
-        spontaneousPlan = nil
         spontaneousBusy = true
-        spontaneousMessage = nil
         spontaneousTask = Task { [weak self] in
             guard let self else { return }
             do {
@@ -1106,35 +1135,84 @@ final class AppState {
 
     func selectSpontaneous(_ plan: SpontaneousPlan) {
         spontaneousPlan = plan
-        spontaneousOpenedLegCount = 0
+        spontaneousLegIndex = 0
+        spontaneousLegOpened = false
         fitCamera(to: plan.path)
     }
 
-    @discardableResult
-    func openSpontaneousNextLeg() -> Bool {
-        guard let plan = spontaneousPlan, spontaneousOpenedLegCount < plan.legs.count else { return false }
+    var spontaneousCurrentLegTarget: Place? {
+        guard let plan = spontaneousPlan, plan.legs.indices.contains(spontaneousLegIndex) else { return nil }
         let endpoints = plan.stops + (plan.returnsHome ? [plan.origin] : [])
-        guard endpoints.indices.contains(spontaneousOpenedLegCount) else { return false }
-        let source = spontaneousOpenedLegCount == 0
-            ? (plan.origin.id == "current-origin" ? MKMapItem.forCurrentLocation() : plan.origin.mapItem())
-            : MKMapItem.forCurrentLocation()
-        let opened = MKMapItem.openMaps(with: [source, endpoints[spontaneousOpenedLegCount].mapItem()],
-                                        launchOptions: [MKLaunchOptionsDirectionsModeKey: MKLaunchOptionsDirectionsModeDriving])
-        if opened { spontaneousOpenedLegCount += 1 }
+        guard endpoints.indices.contains(spontaneousLegIndex) else { return nil }
+        return endpoints[spontaneousLegIndex]
+    }
+
+    var canContinueSpontaneousLeg: Bool {
+        guard let plan = spontaneousPlan else { return false }
+        return spontaneousLegOpened && spontaneousLegIndex + 1 < plan.legs.count
+    }
+
+    @discardableResult
+    func openSpontaneousCurrentLeg() -> Bool {
+        guard let plan = spontaneousPlan, let target = spontaneousCurrentLegTarget else { return false }
+        let source = spontaneousLegIndex == 0 && !spontaneousLegOpened && plan.origin.id != "current-origin"
+            ? plan.origin.mapItem() : MKMapItem.forCurrentLocation()
+        let opened = journeyMapsLauncher.openDirections(from: source, to: target.mapItem())
+        if opened { spontaneousLegOpened = true }
         return opened
     }
 
     @discardableResult
-    func openNextLeg() -> Bool {
-        guard let route, let journey, openedLegCount < journey.legs.count else { return false }
+    func continueSpontaneousLeg() -> Bool {
+        guard canContinueSpontaneousLeg else { return false }
+        spontaneousLegIndex += 1
+        spontaneousLegOpened = false
+        guard openSpontaneousCurrentLeg() else {
+            spontaneousLegIndex -= 1
+            spontaneousLegOpened = true
+            return false
+        }
+        return true
+    }
+
+    var currentLegTarget: Place? {
+        guard let route, let journey, journey.legs.indices.contains(currentLegIndex) else { return nil }
         let endpoints = journey.stops + [route.destination]
-        let source = openedLegCount == 0
-            ? (route.origin.id == "current-origin" ? MKMapItem.forCurrentLocation() : route.origin.mapItem())
-            : MKMapItem.forCurrentLocation()
-        let opened = MKMapItem.openMaps(with: [source, endpoints[openedLegCount].mapItem()],
-                                        launchOptions: [MKLaunchOptionsDirectionsModeKey: MKLaunchOptionsDirectionsModeDriving])
-        if opened { openedLegCount += 1 }
+        guard endpoints.indices.contains(currentLegIndex) else { return nil }
+        return endpoints[currentLegIndex]
+    }
+
+    var canContinueToNextLeg: Bool {
+        guard let journey else { return false }
+        return currentLegOpened && currentLegIndex + 1 < journey.legs.count
+    }
+
+    private func resetJourneyLegHandoff() {
+        currentLegIndex = 0
+        currentLegOpened = false
+    }
+
+    @discardableResult
+    func openCurrentLeg() -> Bool {
+        guard let route, let target = currentLegTarget else { return false }
+        let source = currentLegIndex == 0 && !currentLegOpened && route.origin.id != "current-origin"
+            ? route.origin.mapItem() : MKMapItem.forCurrentLocation()
+        let opened = journeyMapsLauncher.openDirections(from: source, to: target.mapItem())
+        if opened { currentLegOpened = true }
         return opened
+    }
+
+    @discardableResult
+    func continueToNextLeg() -> Bool {
+        guard canContinueToNextLeg else { return false }
+        currentLegIndex += 1
+        currentLegOpened = false
+        guard openCurrentLeg() else {
+            currentLegIndex -= 1
+            currentLegOpened = true
+            return false
+        }
+        return true
     }
 }
 

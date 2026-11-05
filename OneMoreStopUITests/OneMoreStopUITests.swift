@@ -201,8 +201,18 @@ final class OneMoreStopUITests: XCTestCase {
         app.buttons["Drive Until"].tap()
         XCTAssertTrue(app.navigationBars["Explore by time"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.switches["Return to start"].exists)
+        let drivingTime = app.buttons["spontaneousDrivingTimePicker"]
+        XCTAssertTrue(drivingTime.waitForExistence(timeout: 5))
+        drivingTime.tap()
+        app.buttons["30 min"].tap()
+        XCTAssertEqual(drivingTime.value as? String, "30 min")
         app.segmentedControls.buttons["Escape Mode"].tap()
         XCTAssertTrue(app.staticTexts["Escape Mode includes the drive back to your start."].exists)
+        XCTAssertEqual(drivingTime.value as? String, "60 min")
+        drivingTime.tap()
+        app.buttons["240 min"].tap()
+        app.segmentedControls.buttons["Drive Until"].tap()
+        XCTAssertEqual(drivingTime.value as? String, "120 min")
         XCTAssertTrue(app.buttons["Find routed outings"].exists)
     }
 
@@ -239,6 +249,11 @@ final class OneMoreStopUITests: XCTestCase {
         let field = app.searchFields.firstMatch
         XCTAssertTrue(field.waitForExistence(timeout: 10))
         field.tap()
+        if !app.keyboards.firstMatch.waitForExistence(timeout: 5) {
+            field.tap()
+            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5),
+                          "Search did not receive keyboard focus")
+        }
         field.typeText(query)
         let result = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", label ?? query)).firstMatch
         if !result.waitForExistence(timeout: 25) {

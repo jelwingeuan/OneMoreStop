@@ -290,7 +290,8 @@ private struct ExploreView: View {
             SpontaneousPlannerView(state: state, initialKind: spontaneousInitialKind, chooseOrigin: {
                 showSpontaneous = false
                 searchTarget = .origin
-            }, openMaps: { handoffFailed = !state.openSpontaneousNextLeg() })
+            }, openMaps: { handoffFailed = !state.openSpontaneousCurrentLeg() },
+               continueMaps: { handoffFailed = !state.continueSpontaneousLeg() })
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
         }
@@ -310,7 +311,8 @@ private struct ExploreView: View {
         .sheet(isPresented: $showActive, onDismiss: {
             if pendingRecap { pendingRecap = false; showRecap = true }
         }) {
-            ActiveJourneyView(state: state, openMaps: { handoffFailed = !state.openNextLeg() },
+            ActiveJourneyView(state: state, openMaps: { handoffFailed = !state.openCurrentLeg() },
+                              continueMaps: { handoffFailed = !state.continueToNextLeg() },
                               onComplete: completeJourney,
                               onAddOpportunity: { recommendation in
                                   if state.addStop(recommendation) {
@@ -666,12 +668,19 @@ private struct ExploreView: View {
                 Text(plan.stops.map(\.name).joined(separator: " → ")).font(.headline)
                 Text("\(TripFormatting.duration(plan.drivingDuration)) routed driving · \(plan.returnsHome ? "round trip" : "one way")")
                     .font(.caption).foregroundStyle(.secondary)
-                Button(state.spontaneousOpenedLegCount == 0 ? "Open in Apple Maps" : "Continue to next leg") {
-                    handoffFailed = !state.openSpontaneousNextLeg()
+                if let target = state.spontaneousCurrentLegTarget {
+                    Text("Next: \(target.name)").font(.subheadline)
+                }
+                Button(state.spontaneousLegOpened ? "Reopen current leg in Apple Maps" : "Open in Apple Maps") {
+                    handoffFailed = !state.openSpontaneousCurrentLeg()
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.orange)
-                .disabled(state.spontaneousOpenedLegCount >= plan.legs.count)
+                .disabled(state.spontaneousCurrentLegTarget == nil)
+                if state.canContinueSpontaneousLeg {
+                    Button("Continue to next stop") { handoffFailed = !state.continueSpontaneousLeg() }
+                        .buttonStyle(.bordered)
+                }
                 Button("Change outing") { showSpontaneous = true }
                     .font(.caption)
             }
@@ -714,7 +723,8 @@ private struct ExploreView: View {
                                  showJourney = false
                                  searchTarget = .replacement
                              },
-                             onMaps: { handoffFailed = !state.openNextLeg() },
+                             onMaps: { handoffFailed = !state.openCurrentLeg() },
+                             onContinue: { handoffFailed = !state.continueToNextLeg() },
                              onSummary: { showJourney = false; showSummary = true },
                              onActive: {
                                  showJourney = false
@@ -741,6 +751,7 @@ private struct JourneySheetView: View {
     let onSaveForReturn: (StopRecommendation) -> Void
     let onReplace: (Int) -> Void
     let onMaps: () -> Void
+    let onContinue: () -> Void
     let onSummary: () -> Void
     let onActive: () -> Void
     @State private var arrivalDraft = Date.now.addingTimeInterval(2 * 3_600)
@@ -803,14 +814,20 @@ private struct JourneySheetView: View {
         .scrollIndicators(.hidden)
         .safeAreaInset(edge: .bottom) {
             if state.route != nil {
-                Button(action: onMaps) {
-                    Label(state.openedLegCount == 0 ? "Open in Apple Maps" : "Continue to next stop",
-                          systemImage: "arrow.triangle.turn.up.right.diamond.fill")
-                        .frame(maxWidth: .infinity, minHeight: 48)
+                VStack(spacing: 8) {
+                    Button(action: onMaps) {
+                        Label(state.currentLegOpened ? "Reopen current leg in Apple Maps" : "Open in Apple Maps",
+                              systemImage: "arrow.triangle.turn.up.right.diamond.fill")
+                            .frame(maxWidth: .infinity, minHeight: 48)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.orange)
+                    .disabled(state.currentLegTarget == nil)
+                    if state.canContinueToNextLeg {
+                        Button("Continue to next stop", action: onContinue)
+                            .buttonStyle(.bordered)
+                    }
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.orange)
-                .disabled(state.openedLegCount >= (state.journey?.legs.count ?? 0))
                 .padding(.horizontal, 20)
                 .padding(.vertical, 8)
                 .background(.regularMaterial)

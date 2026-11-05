@@ -299,10 +299,7 @@ private struct ExploreView: View {
             if reopenJourneyAfterGroup { showJourney = true; reopenJourneyAfterGroup = false }
         }) {
             LocalGroupView(recommendations: state.recommendations,
-                           origin: state.route?.origin, destination: state.route?.destination) { name in
-                let group = LocalGroupRecord(name: name)
-                modelContext.insert(group)
-            } usePreference: { mode in
+                           origin: state.route?.origin, destination: state.route?.destination) { mode in
                 state.selectMode(mode)
                 reopenJourneyAfterGroup = state.route != nil
                 showGroup = false
@@ -757,6 +754,12 @@ private struct JourneySheetView: View {
     @State private var arrivalDraft = Date.now.addingTimeInterval(2 * 3_600)
     @State private var showingArrivalPicker = false
 
+    private func syncArrivalDraft(to deadline: Date?) {
+        let now = Date.now
+        arrivalDraft = min(max(deadline ?? now.addingTimeInterval(2 * 3_600), now),
+                           now.addingTimeInterval(7 * 86_400))
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
@@ -811,6 +814,8 @@ private struct JourneySheetView: View {
         }
         .sensoryFeedback(.selection, trigger: state.budgetMinutes)
         .sensoryFeedback(.selection, trigger: state.timeMachinePreview)
+        .onAppear { syncArrivalDraft(to: state.timeBudget.deadline) }
+        .onChange(of: state.timeBudget.deadline) { _, deadline in syncArrivalDraft(to: deadline) }
         .scrollIndicators(.hidden)
         .safeAreaInset(edge: .bottom) {
             if state.route != nil {
@@ -849,6 +854,7 @@ private struct JourneySheetView: View {
                         Button("Add stop") {
                             if let item = state.recommendations.first(where: { $0.id == opportunity.id }) { onAdd(item) }
                         }
+                        .disabled(!state.recommendations.contains(where: { $0.id == opportunity.id }))
                         Button("Another") { state.showAnotherOpportunity() }
                             .disabled(state.opportunities.count < 2)
                         Button("Skip") { state.skipOpportunity() }

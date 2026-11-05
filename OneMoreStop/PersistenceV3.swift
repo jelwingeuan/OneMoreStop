@@ -80,15 +80,19 @@ final class IgnoredPlaceRecord {
 final class LocalGroupRecord {
     var id: UUID
     var name: String
+    var routeContextKey: String?
+    var routeLabel: String?
     var participantData: Data
     var voteData: Data
     var placeNamesData: Data
     var preferredModeRaw: String
     var createdAt: Date
 
-    init(name: String) {
+    init(name: String, routeContextKey: String? = nil, routeLabel: String? = nil) {
         id = UUID()
         self.name = name
+        self.routeContextKey = routeContextKey
+        self.routeLabel = routeLabel
         participantData = Data()
         voteData = Data()
         placeNamesData = Data()
@@ -118,7 +122,7 @@ final class LocalGroupRecord {
 
     func addParticipant(_ name: String) -> Bool {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !participants.contains(where: {
+        guard !trimmed.isEmpty, participants.count < 6, !participants.contains(where: {
             $0.compare(trimmed, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
         }) else { return false }
         participants.append(trimmed)
@@ -132,4 +136,18 @@ final class LocalGroupRecord {
     }
 
     func voteCount(for placeID: String) -> Int { votes.values.filter { $0 == placeID }.count }
+
+    func clearVotes() {
+        votes = [:]
+        placeNames = [:]
+    }
+
+    func matches(routeContextKey: String?) -> Bool {
+        guard let routeContextKey else { return false }
+        return self.routeContextKey == routeContextKey
+    }
+
+    func votes(among availablePlaceIDs: Set<String>) -> [String: String] {
+        votes.filter { availablePlaceIDs.contains($0.value) }
+    }
 }

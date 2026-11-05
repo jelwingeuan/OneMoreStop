@@ -164,6 +164,42 @@ struct ProfileHubTests {
         #expect(!displayed.contains(where: { $0.id == journeys[1].id }))
     }
 
+    @Test @MainActor func localGroupsKeepVotesScopedToTheirChosenRoute() throws {
+        let coordinate = Coordinate(latitude: 3, longitude: 101)
+        let origin = Place(id: "origin-a", name: "Start A", coordinate: coordinate)
+        let destination = Place(id: "destination", name: "Finish", coordinate: coordinate)
+        let otherOrigin = Place(id: "origin-b", name: "Start B", coordinate: coordinate)
+        let routeKey = try #require(LocalGroupRouteContext.key(origin: origin, destination: destination))
+        let otherKey = try #require(LocalGroupRouteContext.key(origin: otherOrigin, destination: destination))
+        #expect(routeKey != otherKey)
+
+        let container = try ModelContainer(for: LocalGroupRecord.self,
+                                           configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+        let writer = ModelContext(container)
+        let legacy = LocalGroupRecord(name: "Older group")
+        let current = LocalGroupRecord(name: "Current group", routeContextKey: routeKey,
+                                       routeLabel: "Start A → Finish")
+        for index in 1...6 { #expect(current.addParticipant("Person \(index)")) }
+        #expect(!current.addParticipant("Person 7"))
+        current.castVote(participant: "Person 1", placeID: "coffee", placeName: "Coffee")
+        current.castVote(participant: "Person 2", placeID: "old-stop", placeName: "Old stop")
+        writer.insert(legacy)
+        writer.insert(current)
+        try writer.save()
+
+        let reader = ModelContext(container)
+        let loaded = try #require(reader.fetch(FetchDescriptor<LocalGroupRecord>())
+            .first(where: { $0.id == current.id }))
+        #expect(loaded.matches(routeContextKey: routeKey))
+        #expect(!loaded.matches(routeContextKey: otherKey))
+        #expect(!legacy.matches(routeContextKey: routeKey))
+        #expect(loaded.votes(among: ["coffee"]) == ["Person 1": "coffee"])
+        loaded.clearVotes()
+        try reader.save()
+        #expect(loaded.votes.isEmpty)
+        #expect(loaded.placeNames.isEmpty)
+    }
+
     @Test @MainActor func completingEditedRouteRefreshesOneSavedJourney() throws {
         let container = try ModelContainer(for: RecentJourney.self,
                                            configurations: ModelConfiguration(isStoredInMemoryOnly: true))

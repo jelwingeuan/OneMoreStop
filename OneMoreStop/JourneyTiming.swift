@@ -89,8 +89,29 @@ enum JourneyRhythmService {
 
     static func suggestedNeeds(rules: [JourneyRule], elapsed: TimeInterval,
                                remainingBudget: TimeInterval) -> Set<JourneyNeed> {
-        Set(rules.filter { $0.enabled && elapsed >= Double($0.minimumElapsedMinutes * 60) &&
-            remainingBudget >= Double($0.maximumDetourMinutes * 60) }.map(\.need))
+        Set(suggestedLimits(rules: rules, elapsed: elapsed, remainingBudget: remainingBudget).keys)
+    }
+
+    /// The available wallet can be smaller than a rule's cap and still fit a useful stop.
+    static func suggestedLimits(rules: [JourneyRule], elapsed: TimeInterval,
+                                remainingBudget: TimeInterval) -> [JourneyNeed: TimeInterval] {
+        guard elapsed.isFinite, remainingBudget.isFinite, remainingBudget > 0 else { return [:] }
+        var limits = [JourneyNeed: TimeInterval]()
+        for rule in rules where rule.enabled &&
+            elapsed >= Double(max(0, rule.minimumElapsedMinutes)) * 60 && rule.maximumDetourMinutes > 0 {
+            let cap = min(remainingBudget, Double(rule.maximumDetourMinutes) * 60)
+            limits[rule.need] = max(limits[rule.need] ?? 0, cap)
+        }
+        return limits
+    }
+
+    static func permitsSuggestion(needs: Set<JourneyNeed>, incrementalDetour: TimeInterval,
+                                  limits: [JourneyNeed: TimeInterval]) -> Bool {
+        guard incrementalDetour.isFinite else { return false }
+        return needs.contains { need in
+            guard let limit = limits[need] else { return false }
+            return incrementalDetour <= limit
+        }
     }
 }
 

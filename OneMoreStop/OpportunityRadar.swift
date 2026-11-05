@@ -53,6 +53,7 @@ struct OpportunityContext: Sendable {
     let rhythm: JourneyRhythmState
     let chapter: JourneyChapter
     let interestingOnly: Bool
+    var autopilotLimits: [JourneyNeed: TimeInterval] = [:]
 }
 
 @MainActor
@@ -122,6 +123,13 @@ final class OpportunityRadarEngine {
                 reasons.append("Fits your planned break window")
             }
             if context.returnPlaceIDs.contains(item.id) { reasons.append("Saved for another journey") }
+            for need in item.needs.sorted(by: { $0.rawValue < $1.rawValue }) {
+                if let limit = context.autopilotLimits[need],
+                   item.incrementalDetourTime <= limit + 1,
+                   !context.selectedNeeds.contains(need) {
+                    reasons.append("Fits your \(need.title.lowercased()) suggestion limit")
+                }
+            }
             return JourneyOpportunity(place: PlaceSnapshot(item.place), routeID: context.routeID,
                                       progress: item.progress, distanceAhead: distanceAhead,
                                       approximateMinutesAhead: minutesAhead,
@@ -199,7 +207,11 @@ enum OpportunityValue {
     static func score(_ item: StopRecommendation, context: OpportunityContext,
                       shown: Bool, categorySkips: Int) -> Double {
         var value = item.score
-        value += Double(item.needs.intersection(context.selectedNeeds).count * 10)
+        let eligibleAutopilotNeeds = item.needs.filter { need in
+            guard let limit = context.autopilotLimits[need] else { return false }
+            return item.incrementalDetourTime <= limit + 1
+        }
+        value += Double(item.needs.intersection(context.selectedNeeds.union(eligibleAutopilotNeeds)).count * 10)
         if let mission = context.mission, mission.matches(item.place.category) { value += 12 }
         if context.rhythm == .breakWindow && item.needs.contains(.rest) { value += 8 }
         if context.chapter == .starting && item.needs.contains(.coffee) { value += 3 }

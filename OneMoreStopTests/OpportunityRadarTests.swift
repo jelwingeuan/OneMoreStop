@@ -41,6 +41,21 @@ struct OpportunityRadarTests {
         #expect(radar.statusByID[Place.key(identifier: nil, name: "near", coordinate: a)] == .expired)
     }
 
+    @Test func removedVerifiedResultCannotRemainActionableDuringReplacementCooldown() {
+        let radar = OpportunityRadarEngine()
+        let start = Date(timeIntervalSince1970: 1_000)
+        let first = item("first", progress: 0.2, score: 90)
+        let second = item("second", progress: 0.4, score: 80)
+        radar.update([first, second], context: context(), now: start)
+        #expect(radar.next?.place.name == first.place.name)
+
+        radar.update([second], context: context(), now: start.addingTimeInterval(10))
+
+        #expect(radar.next?.place.name == second.place.name)
+        #expect(!radar.queue.contains(where: { $0.place.name == first.place.name }))
+        #expect(radar.statusByID[Place.key(identifier: nil, name: first.place.name, coordinate: a)] == .expired)
+    }
+
     @Test func skipAndDiversityRemainSessionLocal() {
         let radar = OpportunityRadarEngine()
         let items = [item("coffee-1", progress: 0.2, score: 95),
@@ -88,6 +103,56 @@ struct OpportunityRadarTests {
                                            timeSinceLastSelectedStop: nil) == .breakWindow)
         #expect(JourneyRhythmService.state(elapsed: 100 * 60, remaining: 15 * 60,
                                            timeSinceLastSelectedStop: nil) == .nearDestination)
+    }
+
+    @Test func autopilotUsesTheSmallerOfItsRuleCapAndRemainingWallet() {
+        let rules = [JourneyRule(need: .coffee, enabled: true,
+                                 minimumElapsedMinutes: 90, maximumDetourMinutes: 10)]
+        let fiveMinuteWallet = JourneyRhythmService.suggestedLimits(
+            rules: rules, elapsed: 90 * 60, remainingBudget: 5 * 60)
+        #expect(fiveMinuteWallet[.coffee] == 300.0)
+        #expect(JourneyRhythmService.suggestedNeeds(
+            rules: rules, elapsed: 90 * 60, remainingBudget: 5 * 60) == [.coffee])
+        #expect(JourneyRhythmService.permitsSuggestion(
+            needs: [.coffee], incrementalDetour: 3 * 60, limits: fiveMinuteWallet))
+        #expect(!JourneyRhythmService.permitsSuggestion(
+            needs: [.coffee], incrementalDetour: 6 * 60, limits: fiveMinuteWallet))
+
+        let wideWallet = JourneyRhythmService.suggestedLimits(
+            rules: rules, elapsed: 90 * 60, remainingBudget: 20 * 60)
+        #expect(wideWallet[.coffee] == 600.0)
+        #expect(!JourneyRhythmService.permitsSuggestion(
+            needs: [.coffee], incrementalDetour: 11 * 60, limits: wideWallet))
+        #expect(!JourneyRhythmService.permitsSuggestion(
+            needs: [.fuel], incrementalDetour: 3 * 60, limits: wideWallet))
+        #expect(JourneyRhythmService.suggestedLimits(
+            rules: rules, elapsed: 89 * 60, remainingBudget: 5 * 60).isEmpty)
+    }
+
+    @Test func autopilotOnlyResultsRespectTheirRoutedDetourCap() {
+        let origin = Place(id: "origin", name: "Start", coordinate: a)
+        let destination = Place(id: "destination", name: "Finish", coordinate: b)
+        let baseline = RouteMetrics(duration: 120 * 60, distance: 80_000, path: [a, b])
+        let state = AppState()
+        state.route = RoutePlan(id: UUID(), origin: origin, destination: destination,
+                                baseline: baseline, createdAt: .now)
+        state.journey = Journey(stops: [], legs: [baseline], baseline: baseline)
+        state.mode = .nature
+        state.budgetMinutes = 20
+        state.travelerProgress = 0.8
+        state.autopilotRules = [JourneyRule(need: .coffee, enabled: true,
+                                             minimumElapsedMinutes: 90, maximumDetourMinutes: 10)]
+        let short = item("short coffee", progress: 0.9, score: 90, detour: 3 * 60)
+        let long = item("long coffee", progress: 0.95, score: 95, detour: 11 * 60)
+        state.recommendations = [short, long]
+
+        state.refreshOpportunityPolicy()
+        #expect(state.opportunities.map(\.place.name) == [short.place.name])
+        #expect(state.opportunities.first?.reasons.contains("Fits your coffee suggestion limit") == true)
+
+        state.selectedNeeds = [.coffee]
+        state.refreshOpportunityPolicy()
+        #expect(state.opportunities.contains(where: { $0.place.name == long.place.name }))
     }
 
     @Test func visibleOpportunitySurvivesAChallengerDuringCooldown() {

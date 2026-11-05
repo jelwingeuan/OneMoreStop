@@ -1,5 +1,4 @@
 import SwiftUI
-import SwiftData
 
 struct ActiveJourneyView: View {
     @Bindable var state: AppState
@@ -14,7 +13,6 @@ struct ActiveJourneyView: View {
     @State private var passenger = false
     @State private var showMeetingPlanner = false
     @State private var showGroup = false
-    @Environment(\.modelContext) private var modelContext
 
     var body: some View {
         NavigationStack {
@@ -102,6 +100,7 @@ struct ActiveJourneyView: View {
                                     .disabled(state.opportunities.count < 2)
                                 if FeatureFlags.whatWasThat {
                                     Button("What Was That?") { state.findWhatWasThat() }
+                                        .disabled(!state.canFindWhatWasThat || state.whatWasThatBusy)
                                     if state.whatWasThatBusy { ProgressView("Checking nearby places…") }
                                     ForEach(state.whatWasThatResults) { place in
                                         Label(place.name, systemImage: place.category?.symbol ?? "mappin")
@@ -171,9 +170,7 @@ struct ActiveJourneyView: View {
         }
         .sheet(isPresented: $showGroup) {
             LocalGroupView(recommendations: state.recommendations,
-                origin: state.route?.origin, destination: state.route?.destination) { name in
-                    modelContext.insert(LocalGroupRecord(name: name))
-                } usePreference: { mode in
+                origin: state.route?.origin, destination: state.route?.destination) { mode in
                     state.selectMode(mode)
                     showGroup = false
                 }
@@ -217,6 +214,7 @@ struct ActiveJourneyView: View {
                     }
                     .buttonStyle(.borderedProminent).tint(.orange)
                     .frame(minWidth: 80, minHeight: 44)
+                    .disabled(!state.recommendations.contains(where: { $0.id == opportunity.id }))
                     Button("Skip") {
                         state.skipOpportunity()
                         UISelectionFeedbackGenerator().selectionChanged()

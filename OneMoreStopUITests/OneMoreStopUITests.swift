@@ -222,10 +222,11 @@ final class OneMoreStopUITests: XCTestCase {
         app.launch()
         dismissIntroductionIfNeeded(in: app)
         app.buttons["Local group"].tap()
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Votes are saved on this device"))
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Votes stay on this device"))
             .firstMatch.waitForExistence(timeout: 5))
-        if app.buttons["Create group"].exists { app.buttons["Create group"].tap() }
-        XCTAssertTrue(app.staticTexts["Participants"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Choose a starting place and destination before starting a local vote."]
+            .waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Create group"].exists)
     }
 
     private func dismissIntroductionIfNeeded(in app: XCUIApplication) {

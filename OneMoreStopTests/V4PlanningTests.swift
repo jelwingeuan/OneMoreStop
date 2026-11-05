@@ -127,6 +127,15 @@ private final class SuspendedLocationProvider: CurrentLocationProviding {
     }
 }
 
+private actor SuspendedDiscoveryProbe {
+    private var started = false
+    private var canceled = false
+    func markStarted() { started = true }
+    func markCanceled() { canceled = true }
+    var wasStarted: Bool { started }
+    var wasCanceled: Bool { canceled }
+}
+
 @MainActor
 struct V4PlanningTests {
     let a = Coordinate(latitude: 3, longitude: 101)
@@ -199,6 +208,80 @@ struct V4PlanningTests {
         #expect(state.travelerProgress == 0.4)
         #expect(state.isTravelerOnRoute)
         #expect(state.activeMessage == nil)
+    }
+
+    @Test func endingActiveModeCancelsWhatWasThatSearchBeforeAnotherSession() async throws {
+        let location = SuspendedLocationProvider()
+        let probe = SuspendedDiscoveryProbe()
+        let search = MapSearchService(discoveryRequest: { _, _, _ in
+            await probe.markStarted()
+            return try await withTaskCancellationHandler {
+                try await Task.sleep(for: .seconds(5))
+                return []
+            } onCancel: {
+                Task { await probe.markCanceled() }
+            }
+        })
+        let state = AppState(location: location, search: search, liveOpportunity: FakeActivityProvider())
+        let origin = Place(id: "start", name: "Start", coordinate: a)
+        let destination = Place(id: "end", name: "End", coordinate: b)
+        let baseline = RouteMetrics(duration: 3_600, distance: 10_000, path: [a, b])
+        state.route = RoutePlan(id: UUID(), origin: origin, destination: destination,
+                                baseline: baseline, createdAt: .now)
+        state.journey = Journey(stops: [], legs: [baseline], baseline: baseline)
+        state.startActiveJourney()
+
+        let progress = Task { await state.refreshTravelerProgress() }
+        await location.waitUntilRequested()
+        location.resolve(a)
+        await progress.value
+        #expect(state.canFindWhatWasThat)
+        state.findWhatWasThat()
+        for _ in 0..<100 {
+            if await probe.wasStarted { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(await probe.wasStarted)
+
+        state.endActiveJourney()
+        state.startActiveJourney()
+        for _ in 0..<100 {
+            if await probe.wasCanceled { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(await probe.wasCanceled)
+        #expect(!state.whatWasThatBusy)
+        #expect(state.whatWasThatResults.isEmpty)
+        #expect(!state.canFindWhatWasThat)
+    }
+
+    @Test func whatWasThatDoesNotSearchExpiredRoutePositions() async {
+        let location = SuspendedLocationProvider()
+        let search = MapSearchService(discoveryRequest: { _, _, _ in
+            Issue.record("Expired route positions triggered a search")
+            return []
+        })
+        let state = AppState(location: location, search: search, liveOpportunity: FakeActivityProvider())
+        let origin = Place(id: "start", name: "Start", coordinate: a)
+        let destination = Place(id: "end", name: "End", coordinate: b)
+        let baseline = RouteMetrics(duration: 3_600, distance: 10_000, path: [a, b])
+        state.route = RoutePlan(id: UUID(), origin: origin, destination: destination,
+                                baseline: baseline, createdAt: .now)
+        state.journey = Journey(stops: [], legs: [baseline], baseline: baseline)
+        state.startActiveJourney()
+
+        let progress = Task { await state.refreshTravelerProgress() }
+        await location.waitUntilRequested()
+        location.resolve(a)
+        await progress.value
+
+        let later = Date.now.addingTimeInterval(30 * 60 + 1)
+        state.clockNow = later
+        #expect(!state.canFindWhatWasThat)
+        state.findWhatWasThat(at: later)
+        #expect(!state.whatWasThatBusy)
+        #expect(state.whatWasThatResults.isEmpty)
+        state.endActiveJourney()
     }
 
     @Test func delayedRepeatCannotReplaceANewDestination() async {
@@ -319,6 +402,44 @@ struct V4PlanningTests {
         #expect(state.addStop(captured))
         #expect(state.journey?.stops.first?.name == "Current stop")
         #expect(state.journey?.drivingDuration == 4_320.0)
+    }
+
+    @Test func impossibleArrivalDeadlineRejectsZeroDetourStopAndChain() {
+        let origin = Place(id: "start", name: "Start", coordinate: a)
+        let destination = Place(id: "end", name: "End", coordinate: b)
+        let coffee = Place(id: "coffee", name: "Coffee", coordinate: a, category: .coffee)
+        let park = Place(id: "park", name: "Park", coordinate: b, category: .park)
+        let baseline = RouteMetrics(duration: 60 * 60, distance: 40_000, path: [a, b])
+        let leg = RouteMetrics(duration: 30 * 60, distance: 20_000, path: [a, b])
+        let plan = RoutePlan(id: UUID(), origin: origin, destination: destination,
+                             baseline: baseline, createdAt: .now)
+        let state = AppState()
+        state.route = plan
+        state.journey = Journey(stops: [], legs: [baseline], baseline: baseline)
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        state.clockNow = now
+        state.timeBudget = .arriveBy(now.addingTimeInterval(30 * 60))
+        let recommendation = StopRecommendation(place: coffee, detourTime: 0, detourDistance: 0,
+            distanceFromRoute: 0, progress: 0.5, score: 80,
+            firstLeg: leg, secondLeg: leg)
+        state.recommendations = [recommendation]
+
+        #expect(!state.addStop(recommendation))
+        #expect(state.journey?.stops.isEmpty == true)
+        #expect(state.journeyMessage?.contains("arrival time") == true)
+
+        let chainLeg = RouteMetrics(duration: 20 * 60, distance: 13_000, path: [a, b])
+        let chain = StopCombination(first: coffee, second: park,
+            journey: Journey(stops: [coffee, park], legs: [chainLeg, chainLeg, chainLeg], baseline: baseline),
+            insertionIndex: 0, routeID: plan.id, originalStopIDs: [], needs: [.coffee, .nature],
+            incrementalDetour: 0)
+        #expect(!state.addCombination(chain))
+        #expect(state.journey?.stops.isEmpty == true)
+
+        state.activeJourney = true
+        state.travelerProgress = 0.5
+        state.timeBudget = .arriveBy(now.addingTimeInterval(20 * 60))
+        #expect(!state.addStop(recommendation))
     }
 
     @Test func rediscoveryRemovesAnUnavailableOpportunityImmediately() {

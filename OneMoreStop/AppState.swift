@@ -119,8 +119,9 @@ final class AppState {
     var plannedVisitSeconds: TimeInterval {
         selectedStops.reduce(0) { $0 + Double(plannedVisitMinutes[$1.id, default: 0] * 60) }
     }
-    private func remainingPlannedVisitSeconds(for visits: [String: Int]) -> TimeInterval {
-        guard activeJourney, isTravelerOnRoute, let journey,
+    private func remainingPlannedVisitSeconds(for visits: [String: Int],
+                                              in proposedJourney: Journey? = nil) -> TimeInterval {
+        guard activeJourney, isTravelerOnRoute, let journey = proposedJourney ?? self.journey,
               journey.legs.count > journey.stops.count, journey.drivingDistance > 0 else {
             return Double(visits.values.reduce(0, +) * 60)
         }
@@ -151,6 +152,41 @@ final class AppState {
         return timeBudget.remaining(baseline: route?.baseline.duration ?? 0,
                                     journey: journey?.drivingDuration ?? route?.baseline.duration ?? 0,
                                     plannedVisits: plannedVisitSeconds, now: clockNow)
+    }
+
+    private func fitsDeadline(_ proposedJourney: Journey, visits: [String: Int]) -> Bool {
+        guard case .arriveBy(let deadline) = timeBudget else { return true }
+        guard !activeJourney || isTravelerOnRoute else { return false }
+        let progress = travelerProgress.isFinite ? min(max(travelerProgress, 0), 1) : 0
+        let remainingDriving = activeJourney
+            ? proposedJourney.drivingDuration * (1 - progress) : proposedJourney.drivingDuration
+        return deadline.timeIntervalSince(clockNow) + 1 >= remainingDriving +
+            remainingPlannedVisitSeconds(for: visits, in: proposedJourney)
+    }
+
+    private func fitsSelectedTimeBudget(_ proposedJourney: Journey, visits: [String: Int]) -> Bool {
+        switch timeBudget {
+        case .spare(let minutes):
+            return proposedJourney.extraDuration <= Double(max(0, minutes) * 60) + 1
+        case .arriveBy:
+            return fitsDeadline(proposedJourney, visits: visits)
+        }
+    }
+
+    private func proposedJourney(adding result: StopRecommendation, to current: Journey) -> Journey? {
+        guard current.legs.indices.contains(result.insertionIndex) else { return nil }
+        var legs = current.legs
+        legs.replaceSubrange(result.insertionIndex...result.insertionIndex,
+                             with: [result.firstLeg, result.secondLeg])
+        return Journey(stops: JourneyMath.inserted(result.place, into: current.stops,
+                                                    at: result.insertionIndex),
+                       legs: legs, baseline: current.baseline)
+    }
+
+    private func candidateFitsDeadline(_ result: StopRecommendation) -> Bool {
+        guard case .arriveBy = timeBudget else { return true }
+        guard let journey, let proposed = proposedJourney(adding: result, to: journey) else { return false }
+        return fitsDeadline(proposed, visits: plannedVisitMinutes)
     }
     var drivingArrival: Date? { journey.map { clockNow.addingTimeInterval($0.drivingDuration) } }
     var activeDrivingArrival: Date? {
@@ -190,7 +226,7 @@ final class AppState {
 
     private let location: any CurrentLocationProviding
     @ObservationIgnored private let journeyMapsLauncher: any JourneyMapsLaunching
-    let search = MapSearchService()
+    let search: MapSearchService
     private let directions = DirectionsService()
     private var discoveryTask: Task<Void, Never>?
     private var budgetDiscoveryTask: Task<Void, Never>?
@@ -198,6 +234,8 @@ final class AppState {
     private var journeyTask: Task<Void, Never>?
     private var spontaneousTask: Task<Void, Never>?
     private var routeComparisonTask: Task<Void, Never>?
+    private var whatWasThatTask: Task<Void, Never>?
+    private var whatWasThatRequestID = UUID()
     private var routeComparisonID = UUID()
     private var verified: [StopRecommendation] = []
     private var verifiedBudget = 0
@@ -211,9 +249,11 @@ final class AppState {
     @ObservationIgnored private var liveActivityGeneration = 0
 
     init(location: any CurrentLocationProviding = LocationService(),
+         search: MapSearchService? = nil,
          liveOpportunity: any LiveActivityProviding = LiveOpportunityProvider(),
          journeyMapsLauncher: any JourneyMapsLaunching = SystemJourneyMapsLauncher()) {
         self.location = location
+        self.search = search ?? MapSearchService()
         self.liveOpportunity = liveOpportunity
         self.journeyMapsLauncher = journeyMapsLauncher
     }
@@ -245,6 +285,15 @@ final class AppState {
     var radarExpiredCount: Int { radar.expiredCount }
     var radarSkippedCount: Int { radar.skippedIDs.count }
     var chapter: JourneyChapter { JourneyChapter.at(progress: travelerProgress) }
+    var canFindWhatWasThat: Bool { activeJourney && whatWasThatCenter(at: clockNow) != nil }
+
+    private func whatWasThatCenter(at date: Date) -> Coordinate? {
+        let recent = recentRoutePositions.filter {
+            let age = date.timeIntervalSince($0.date)
+            return age >= 0 && age <= 30 * 60
+        }
+        return (recent.dropLast().last ?? recent.last)?.coordinate
+    }
     var routeOpportunitySummary: [(String, Int)] {
         guard let discoveryCoverage, let route else { return [] }
         return RouteOpportunitySummary.counts(discoveryCoverage, path: journey?.path ?? route.baseline.path)
@@ -338,6 +387,9 @@ final class AppState {
     }
 
     func endActiveJourney() {
+        whatWasThatTask?.cancel()
+        whatWasThatTask = nil
+        whatWasThatRequestID = UUID()
         activeJourney = false
         activeMessage = nil
         lastActiveDiscoveryAt = nil
@@ -535,7 +587,7 @@ final class AppState {
         if verifiedMode == mode && verifiedRouteID == route?.id && verifiedStopIDs == selectedStops.map(\.id),
            budgetMinutes <= verifiedBudget {
             recommendations = Array(StopScoringService.withinBudget(verified, minutes: budgetMinutes)
-                .filter { !radar.skippedIDs.contains($0.id) }
+                .filter { !radar.skippedIDs.contains($0.id) && candidateFitsDeadline($0) }
                 .prefix(DiscoveryTuning.maxRecommendations))
             phase = recommendations.isEmpty ? .noResults : .loaded
             updateRadar()
@@ -716,25 +768,30 @@ final class AppState {
         if opportunities.isEmpty && phase != .discoveringPlaces && phase != .calculatingDetours { discover() }
     }
 
-    func findWhatWasThat() {
+    func findWhatWasThat(at date: Date = .now) {
         guard activeJourney, !whatWasThatBusy,
-              let center = (recentRoutePositions.dropLast().last ?? recentRoutePositions.last)?.coordinate else { return }
+              let center = whatWasThatCenter(at: date) else { return }
+        let requestID = UUID()
+        whatWasThatRequestID = requestID
         whatWasThatBusy = true
         whatWasThatResults = []
-        Task { [weak self] in
+        whatWasThatTask = Task { [weak self] in
             guard let self else { return }
             var found = [Place]()
             for category in [StopCategory.food, .attractions, .fuel] {
-                if Task.isCancelled || !activeJourney { break }
-                if let places = try? await search.discover(around: center, radius: 1_500, category: category) {
+                guard !Task.isCancelled, activeJourney, whatWasThatRequestID == requestID else { return }
+                do {
+                    let places = try await search.discover(around: center, radius: 1_500, category: category)
                     found += places
-                }
+                } catch is CancellationError { return }
+                catch { continue }
             }
-            guard activeJourney else { return }
+            guard !Task.isCancelled, activeJourney, whatWasThatRequestID == requestID else { return }
             whatWasThatResults = Array(CandidateDeduplication.unique(found)
                 .sorted { GeoMath.distance($0.coordinate, center) < GeoMath.distance($1.coordinate, center) }
                 .prefix(6))
             whatWasThatBusy = false
+            whatWasThatTask = nil
         }
     }
 
@@ -764,20 +821,37 @@ final class AppState {
     private func updateRadar() {
         guard let route, let journey, isTravelerOnRoute else { opportunities = []; return }
         let elapsed = journey.drivingDuration * travelerProgress
-        let additionalNeeds = JourneyRhythmService.suggestedNeeds(rules: autopilotRules,
+        let autopilotLimits = JourneyRhythmService.suggestedLimits(rules: autopilotRules,
             elapsed: elapsed, remainingBudget: remainingTime)
-        let context = OpportunityContext(routeID: route.id, routePath: journey.path,
+        var context = OpportunityContext(routeID: route.id, routePath: journey.path,
             routeDuration: journey.drivingDuration, travelerProgress: travelerProgress,
-            allowedExtraDriving: allowedExtraDriving, selectedNeeds: selectedNeeds.union(additionalNeeds),
+            allowedExtraDriving: allowedExtraDriving, selectedNeeds: selectedNeeds,
             categoryViews: sessionViewedCategories,
             returnPlaceIDs: Set(returnOpportunities.map { $0.place.place.id }),
             mission: selectedMission, rhythm: rhythmState, chapter: chapter,
             interestingOnly: interestingOnly)
-        radar.update(recommendations, context: context)
+        context.autopilotLimits = autopilotLimits
+        radar.update(recommendations.filter {
+            autopilotAllows($0, limits: autopilotLimits) && candidateFitsDeadline($0)
+        }, context: context)
         opportunities = radar.queue
         if activeJourney, FeatureFlags.liveActivityOpportunity, let content = liveActivityContent {
             Task { [liveOpportunity] in await liveOpportunity.update(content) }
         }
+    }
+
+    private func autopilotAllows(_ result: StopRecommendation,
+                                 limits: [JourneyNeed: TimeInterval]) -> Bool {
+        let autopilotNeeds = result.needs.intersection(Set(limits.keys))
+        guard !autopilotNeeds.isEmpty, result.needs.isDisjoint(with: selectedNeeds),
+              !returnOpportunities.contains(where: { $0.place.place.id == result.id }),
+              selectedMission?.matches(result.place.category) != true else { return true }
+        let modeCategories = mode.categories(isMalaysia: route.map { RegionProfile.isMalaysia($0.destination.coordinate) } ?? false,
+                                             localFirst: localFirst, evJourney: evJourney,
+                                             adventure: budgetMinutes >= 60, mood: mood)
+        guard !modeCategories.contains(result.place.category ?? .attractions) else { return true }
+        return JourneyRhythmService.permitsSuggestion(needs: autopilotNeeds,
+            incrementalDetour: result.incrementalDetourTime, limits: limits)
     }
 
     private var liveActivityContent: JourneyActivityAttributes.ContentState? {
@@ -813,8 +887,9 @@ final class AppState {
         let mood = mood
         let budget = budgetMinutes
         let elapsed = journey.drivingDuration * travelerProgress
-        let discoveryNeeds = selectedNeeds.union(JourneyRhythmService.suggestedNeeds(
-            rules: autopilotRules, elapsed: elapsed, remainingBudget: remainingTime))
+        let autopilotLimits = JourneyRhythmService.suggestedLimits(
+            rules: autopilotRules, elapsed: elapsed, remainingBudget: remainingTime)
+        let discoveryNeeds = selectedNeeds.union(autopilotLimits.keys)
         let requestID = UUID()
         discoveryID = requestID
         recommendations = []
@@ -840,7 +915,7 @@ final class AppState {
                 let allCandidates = CandidateDeduplication.unique(discovery.places + returnPlaces)
                 let ranked = try await DetourEngine(directions: directions).recommendations(
                     for: route, journey: journey, candidates: allCandidates, mode: mode, mood: mood,
-                    localFirst: localFirst, evJourney: evJourney, needs: discoveryNeeds,
+                    localFirst: localFirst, evJourney: evJourney, needs: selectedNeeds,
                     ignoredIDs: ignoredPlaceIDs.union(notInterestedIDs).union(
                         selectedMission == .newPlace ? previouslySelectedPlaceIDs : []),
                     preferenceCounts: preferenceCounts,
@@ -849,19 +924,21 @@ final class AppState {
                         guard let self, discoveryID == requestID else { return }
                         recommendations = Array(partial.filter {
                             !ignoredPlaceIDs.contains($0.id) && !notInterestedIDs.contains($0.id) &&
-                            !radar.skippedIDs.contains($0.id)
+                            !radar.skippedIDs.contains($0.id) && autopilotAllows($0, limits: autopilotLimits) &&
+                            candidateFitsDeadline($0)
                         }.prefix(DiscoveryTuning.maxRecommendations))
-                        if opportunities.isEmpty { updateRadar() }
+                        updateRadar()
                     }
                 try Task.checkCancellation()
                 guard discoveryID == requestID else { return }
-                verified = ranked
+                verified = ranked.filter { autopilotAllows($0, limits: autopilotLimits) &&
+                    candidateFitsDeadline($0) }
                 checkingPlaces = []
                 verifiedBudget = budget
                 verifiedMode = mode
                 verifiedRouteID = route.id
                 verifiedStopIDs = journey.stops.map(\.id)
-                recommendations = Array(StopScoringService.withinBudget(ranked, minutes: budget)
+                recommendations = Array(StopScoringService.withinBudget(verified, minutes: budget)
                     .filter { !ignoredPlaceIDs.contains($0.id) && !notInterestedIDs.contains($0.id) &&
                         !radar.skippedIDs.contains($0.id) }
                     .prefix(DiscoveryTuning.maxRecommendations))
@@ -872,14 +949,24 @@ final class AppState {
                     activeMessage = "Optional stop ahead: \(useful.place.name), \(TripFormatting.extraTime(useful.incrementalDetourTime)) added driving."
                 }
                 if FeatureFlags.stopCombinations && journey.stops.count <= 1 {
-                    combinations = try await StopCombinationService(directions: directions).combinations(
+                    let verifiedCombinations = try await StopCombinationService(directions: directions).combinations(
                         for: route, journey: journey, verified: recommendations,
                         allowedExtraDriving: allowedExtraDriving)
+                    try Task.checkCancellation()
+                    guard discoveryID == requestID else { return }
+                    combinations = verifiedCombinations.filter {
+                        fitsSelectedTimeBudget($0.journey, visits: plannedVisitMinutes)
+                    }
                 }
                 if FeatureFlags.journeyChains && journey.stops.count <= 1 {
-                    chains = try await JourneyChainEngine(directions: directions).chains(
+                    let verifiedChains = try await JourneyChainEngine(directions: directions).chains(
                         route: route, journey: journey, candidates: recommendations,
                         budget: allowedExtraDriving)
+                    try Task.checkCancellation()
+                    guard discoveryID == requestID else { return }
+                    chains = verifiedChains.filter {
+                        fitsSelectedTimeBudget($0.journey, visits: plannedVisitMinutes)
+                    }
                 }
                 if mode == .ev {
                     for charging in recommendations.filter({ $0.place.category == .charging })
@@ -911,14 +998,11 @@ final class AppState {
     func addStop(_ recommendation: StopRecommendation) -> Bool {
         guard !journeyBusy, let journey, canAddStop,
               let current = recommendations.first(where: { $0.id == recommendation.id }),
-              journey.legs.indices.contains(current.insertionIndex) else { return false }
-        let index = current.insertionIndex
-        var legs = journey.legs
-        legs.replaceSubrange(index...index, with: [current.firstLeg, current.secondLeg])
-        let updated = Journey(stops: JourneyMath.inserted(current.place, into: journey.stops, at: index),
-                              legs: legs, baseline: journey.baseline)
-        guard updated.extraDuration <= allowedExtraDriving + 1 else {
-            journeyMessage = "This stop now exceeds your extra driving time budget. Try a wider budget."
+              let updated = proposedJourney(adding: current, to: journey) else { return false }
+        guard fitsSelectedTimeBudget(updated, visits: plannedVisitMinutes) else {
+            journeyMessage = timeBudget.deadline == nil
+                ? "This stop now exceeds your extra driving time budget. Try a wider budget."
+                : "This stop no longer fits your arrival time. Choose a later deadline."
             return false
         }
         self.journey = updated
@@ -935,8 +1019,13 @@ final class AppState {
         guard !journeyBusy, let route, let journey,
               route.id == combination.routeID,
               journey.stops.map(\.id) == combination.originalStopIDs,
-              combination.journey.stops.count <= DiscoveryTuning.maxStops,
-              combination.journey.extraDuration <= allowedExtraDriving + 1 else { return false }
+              combination.journey.stops.count <= DiscoveryTuning.maxStops else { return false }
+        guard fitsSelectedTimeBudget(combination.journey, visits: plannedVisitMinutes) else {
+            journeyMessage = timeBudget.deadline == nil
+                ? "These stops now exceed your extra driving time budget."
+                : "These stops no longer fit your arrival time."
+            return false
+        }
         self.journey = combination.journey
         radar.accept(combination.first.id)
         radar.accept(combination.second.id)
@@ -991,10 +1080,7 @@ final class AppState {
                 try Task.checkCancellation()
                 let updated = Journey(stops: stops, legs: legs, baseline: route.baseline)
                 let retainedVisits = plannedVisitMinutes.filter { key, _ in stops.contains { $0.id == key } }
-                let proposedAllowance = activeDeadlineBudget(at: clockNow, visits: retainedVisits)?.allowedTotalDetour
-                    ?? timeBudget.allowedExtraDriving(baseline: route.baseline.duration,
-                        plannedVisits: Double(retainedVisits.values.reduce(0, +) * 60), now: clockNow)
-                guard updated.extraDuration <= proposedAllowance + 1 ||
+                guard fitsSelectedTimeBudget(updated, visits: retainedVisits) ||
                         stops.count < (journey?.stops.count ?? 0) else {
                     journeyMessage = "That order exceeds your time budget. Your previous trip is still here."
                     journeyBusy = false

@@ -14,6 +14,8 @@ enum DiscoveryTuning {
     static let maxRecommendations = 8
     static let maxConcurrentRequests = 3
     static let cacheLifetime: TimeInterval = 600
+    static let maxCachedSearches = 64
+    static let maxCachedRoutes = 128
     static let maxStops = 3
 
     static func sampleSpacing(for routeMeters: Double) -> Double {

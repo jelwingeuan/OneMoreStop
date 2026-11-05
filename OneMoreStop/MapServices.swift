@@ -174,6 +174,49 @@ final class LocationService: NSObject, @MainActor CLLocationManagerDelegate {
     }
 }
 
+struct ExpiringMemoryCache<Key: Hashable, Value> {
+    private struct Entry {
+        let value: Value
+        let storedAt: Date
+        var lastUse: UInt64
+    }
+
+    private var entries: [Key: Entry] = [:]
+    private var useCounter: UInt64 = 0
+    private let lifetime: TimeInterval
+    private let capacity: Int
+
+    init(lifetime: TimeInterval, capacity: Int) {
+        self.lifetime = max(0, lifetime)
+        self.capacity = max(1, capacity)
+    }
+
+    mutating func get(_ key: Key, now: Date = .now) -> Value? {
+        guard var entry = entries[key] else { return nil }
+        guard now.timeIntervalSince(entry.storedAt) < lifetime else {
+            entries[key] = nil
+            return nil
+        }
+        useCounter &+= 1
+        entry.lastUse = useCounter
+        entries[key] = entry
+        return entry.value
+    }
+
+    mutating func set(_ value: Value, for key: Key, now: Date = .now) {
+        useCounter &+= 1
+        entries[key] = Entry(value: value, storedAt: now, lastUse: useCounter)
+        entries = entries.filter { now.timeIntervalSince($0.value.storedAt) < lifetime }
+        let overflow = entries.count - capacity
+        guard overflow > 0 else { return }
+        for (key, _) in entries.sorted(by: { $0.value.lastUse < $1.value.lastUse }).prefix(overflow) {
+            entries[key] = nil
+        }
+    }
+
+    var count: Int { entries.count }
+}
+
 private struct DiscoverySearchKey: Hashable {
     let center: Coordinate
     let radius: Double
@@ -182,6 +225,12 @@ private struct DiscoverySearchKey: Hashable {
 
 @MainActor
 final class MapSearchService: NSObject, @MainActor MKLocalSearchCompleterDelegate {
+    private struct DiscoveryFlight {
+        let id: UUID
+        let task: Task<[Place], Error>
+        var waiters: Set<UUID>
+    }
+
     private let completer = MKLocalSearchCompleter()
     private var completionHandler: (([MKLocalSearchCompletion]) -> Void)?
     private var suggestionGateTask: Task<Void, Never>?
@@ -190,8 +239,9 @@ final class MapSearchService: NSObject, @MainActor MKLocalSearchCompleterDelegat
     private var latestSuggestionQuery = ""
     private var latestSuggestionCoordinate: Coordinate?
     private var active: [UUID: MKLocalSearch] = [:]
-    private var discoveryCache: [DiscoverySearchKey: ([Place], Date)] = [:]
-    private var discoveryInflight: [DiscoverySearchKey: (UUID, Task<[Place], Error>)] = [:]
+    private var discoveryCache = ExpiringMemoryCache<DiscoverySearchKey, [Place]>(
+        lifetime: DiscoveryTuning.cacheLifetime, capacity: DiscoveryTuning.maxCachedSearches)
+    private var discoveryInflight: [DiscoverySearchKey: DiscoveryFlight] = [:]
     private let discoveryRequest: (@MainActor (Coordinate, Double, StopCategory) async throws -> [Place])?
 
     init(discoveryRequest: (@MainActor (Coordinate, Double, StopCategory) async throws -> [Place])? = nil) {
@@ -261,23 +311,62 @@ final class MapSearchService: NSObject, @MainActor MKLocalSearchCompleterDelegat
     }
 
     func discover(around center: Coordinate, radius: Double, category: StopCategory) async throws -> [Place] {
+        try Task.checkCancellation()
         let key = DiscoverySearchKey(center: center, radius: radius, category: category)
-        if let cached = discoveryCache[key], Date().timeIntervalSince(cached.1) < DiscoveryTuning.cacheLifetime {
+        if let cached = discoveryCache.get(key) {
             #if DEBUG
             await MapRequestGate.shared.recordCacheHit()
             #endif
-            return cached.0
+            try Task.checkCancellation()
+            return cached
         }
-        if let pending = discoveryInflight[key] { return try await pending.1.value }
-        let requestID = UUID()
-        let task = Task { @MainActor in try await performDiscovery(around: center, radius: radius, category: category) }
-        discoveryInflight[key] = (requestID, task)
-        defer { if discoveryInflight[key]?.0 == requestID { discoveryInflight[key] = nil } }
-        let places = try await task.value
-        try Task.checkCancellation()
-        discoveryCache[key] = (places, .now)
-        return places
+        let waiterID = UUID()
+        let flight: DiscoveryFlight
+        if var existing = discoveryInflight[key] {
+            existing.waiters.insert(waiterID)
+            discoveryInflight[key] = existing
+            flight = existing
+        } else {
+            let task = Task { @MainActor [self] in
+                try Task.checkCancellation()
+                let places = try await performDiscovery(around: center, radius: radius, category: category)
+                try Task.checkCancellation()
+                discoveryCache.set(places, for: key)
+                return places
+            }
+            flight = DiscoveryFlight(id: UUID(), task: task, waiters: [waiterID])
+            discoveryInflight[key] = flight
+        }
+        let flightID = flight.id
+        let task = flight.task
+        defer { removeDiscoveryWaiter(key: key, flightID: flightID, waiterID: waiterID) }
+        return try await withTaskCancellationHandler {
+            let places = try await task.value
+            try Task.checkCancellation()
+            return places
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.removeDiscoveryWaiter(key: key, flightID: flightID, waiterID: waiterID)
+            }
+        }
     }
+
+    private func removeDiscoveryWaiter(key: DiscoverySearchKey, flightID: UUID, waiterID: UUID) {
+        guard var flight = discoveryInflight[key], flight.id == flightID,
+              flight.waiters.remove(waiterID) != nil else { return }
+        if flight.waiters.isEmpty {
+            discoveryInflight[key] = nil
+            flight.task.cancel()
+        } else {
+            discoveryInflight[key] = flight
+        }
+    }
+
+    #if DEBUG
+    func pendingDiscoveryWaiters(around center: Coordinate, radius: Double, category: StopCategory) -> Int {
+        discoveryInflight[DiscoverySearchKey(center: center, radius: radius, category: category)]?.waiters.count ?? 0
+    }
+    #endif
 
     private func performDiscovery(around center: Coordinate, radius: Double, category: StopCategory) async throws -> [Place] {
         if let discoveryRequest { return try await discoveryRequest(center, radius, category) }
@@ -326,7 +415,7 @@ final class MapSearchService: NSObject, @MainActor MKLocalSearchCompleterDelegat
 
     func cancelAll() {
         cancelSuggestions()
-        discoveryInflight.values.forEach { $0.1.cancel() }
+        discoveryInflight.values.forEach { $0.task.cancel() }
         discoveryInflight.removeAll()
         active.values.forEach { $0.cancel() }
         active.removeAll()
@@ -375,39 +464,94 @@ private extension StopCategory {
 }
 
 actor RoutingCache {
-    private var values: [String: (RouteMetrics, Date)] = [:]
+    private var values = ExpiringMemoryCache<String, RouteMetrics>(
+        lifetime: DiscoveryTuning.cacheLifetime, capacity: DiscoveryTuning.maxCachedRoutes)
 
     func get(_ key: String) -> RouteMetrics? {
-        guard let value = values[key], Date().timeIntervalSince(value.1) < DiscoveryTuning.cacheLifetime else { return nil }
-        return value.0
+        values.get(key)
     }
 
-    func set(_ value: RouteMetrics, for key: String) { values[key] = (value, .now) }
+    func set(_ value: RouteMetrics, for key: String) { values.set(value, for: key) }
 }
 
 @MainActor
 final class DirectionsService {
+    private struct RouteFlight {
+        let id: UUID
+        let task: Task<RouteMetrics, Error>
+        var waiters: Set<UUID>
+    }
+
     private let cache = RoutingCache()
     private var active: [UUID: MKDirections] = [:]
-    private var inflight: [String: (UUID, Task<RouteMetrics, Error>)] = [:]
+    private var inflight: [String: RouteFlight] = [:]
+    private let routeRequest: (@MainActor (Place, Place) async throws -> RouteMetrics)?
+
+    init(routeRequest: (@MainActor (Place, Place) async throws -> RouteMetrics)? = nil) {
+        self.routeRequest = routeRequest
+    }
 
     func route(from origin: Place, to destination: Place) async throws -> RouteMetrics {
-        let key = "\(origin.coordinate.latitude.rounded(to: 4)),\(origin.coordinate.longitude.rounded(to: 4)):\(destination.coordinate.latitude.rounded(to: 4)),\(destination.coordinate.longitude.rounded(to: 4)):car"
+        try Task.checkCancellation()
+        let key = routeKey(from: origin, to: destination)
         if let cached = await cache.get(key) {
             #if DEBUG
             await MapRequestGate.shared.recordCacheHit()
             #endif
+            try Task.checkCancellation()
             return cached
         }
-        if let pending = inflight[key] { return try await pending.1.value }
-        let requestID = UUID()
-        let task = Task { @MainActor in try await requestRoute(from: origin, to: destination) }
-        inflight[key] = (requestID, task)
-        defer { if inflight[key]?.0 == requestID { inflight[key] = nil } }
-        let value = try await task.value
         try Task.checkCancellation()
-        await cache.set(value, for: key)
-        return value
+        let waiterID = UUID()
+        let flight: RouteFlight
+        if var existing = inflight[key] {
+            existing.waiters.insert(waiterID)
+            inflight[key] = existing
+            flight = existing
+        } else {
+            let task = Task { @MainActor [self] in
+                try Task.checkCancellation()
+                let value = try await requestRoute(from: origin, to: destination)
+                try Task.checkCancellation()
+                await cache.set(value, for: key)
+                return value
+            }
+            flight = RouteFlight(id: UUID(), task: task, waiters: [waiterID])
+            inflight[key] = flight
+        }
+        let flightID = flight.id
+        let task = flight.task
+        defer { removeRouteWaiter(key: key, flightID: flightID, waiterID: waiterID) }
+        return try await withTaskCancellationHandler {
+            let value = try await task.value
+            try Task.checkCancellation()
+            return value
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.removeRouteWaiter(key: key, flightID: flightID, waiterID: waiterID)
+            }
+        }
+    }
+
+    private func removeRouteWaiter(key: String, flightID: UUID, waiterID: UUID) {
+        guard var flight = inflight[key], flight.id == flightID,
+              flight.waiters.remove(waiterID) != nil else { return }
+        if flight.waiters.isEmpty {
+            inflight[key] = nil
+            flight.task.cancel()
+        } else {
+            inflight[key] = flight
+        }
+    }
+
+    #if DEBUG
+    func pendingRouteWaiters(from origin: Place, to destination: Place) -> Int {
+        inflight[routeKey(from: origin, to: destination)]?.waiters.count ?? 0
+    }
+    #endif
+
+    private func routeKey(from origin: Place, to destination: Place) -> String {
+        "\(origin.coordinate.latitude.rounded(to: 4)),\(origin.coordinate.longitude.rounded(to: 4)):\(destination.coordinate.latitude.rounded(to: 4)),\(destination.coordinate.longitude.rounded(to: 4)):car"
     }
 
     func routeOptions(from origin: Place, to destination: Place) async throws -> [RouteMetrics] {
@@ -415,6 +559,7 @@ final class DirectionsService {
     }
 
     private func requestRoute(from origin: Place, to destination: Place) async throws -> RouteMetrics {
+        if let routeRequest { return try await routeRequest(origin, destination) }
         guard let first = try await calculate(from: origin, to: destination, alternates: false).first else {
             throw DirectionsError.noRoute
         }
@@ -456,7 +601,7 @@ final class DirectionsService {
     func cancelAll() {
         active.values.forEach { $0.cancel() }
         active.removeAll()
-        inflight.values.forEach { $0.1.cancel() }
+        inflight.values.forEach { $0.task.cancel() }
         inflight.removeAll()
     }
 

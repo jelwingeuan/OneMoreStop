@@ -197,6 +197,18 @@ struct PlaceDetailView: View {
 
 enum SavedSection: Hashable { case collections, places, journeys }
 
+enum JourneyHistory {
+    static func displayed(from journeys: [RecentJourney]) -> [RecentJourney] {
+        var recentUnsavedCount = 0
+        return journeys.filter { journey in
+            if journey.saved { return true }
+            guard recentUnsavedCount < 10 else { return false }
+            recentUnsavedCount += 1
+            return true
+        }
+    }
+}
+
 struct SavedView: View {
     @Binding var focusSection: SavedSection?
     let onChoose: (Place) -> Void
@@ -264,10 +276,11 @@ struct SavedView: View {
                     .onDelete { offsets in for index in offsets { modelContext.delete(returnPlaces[index]) } }
                 }
                 Section("Journeys") {
+                    let displayedJourneys = JourneyHistory.displayed(from: journeys)
                     if journeys.isEmpty {
                         Text("Finish a journey to keep a local summary.").foregroundStyle(.secondary)
                     }
-                    ForEach(journeys.prefix(10)) { journey in
+                    ForEach(displayedJourneys) { journey in
                         VStack(alignment: .leading, spacing: 5) {
                             HStack {
                                 Text(journey.destinationName).font(.headline)
@@ -284,7 +297,7 @@ struct SavedView: View {
                             }
                         }
                     }
-                    .onDelete { offsets in for index in offsets { modelContext.delete(journeys[index]) } }
+                    .onDelete { offsets in for index in offsets { modelContext.delete(displayedJourneys[index]) } }
                 }
                 .id(SavedSection.journeys)
                 Section("Planning challenges") {

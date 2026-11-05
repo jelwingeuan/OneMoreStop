@@ -143,6 +143,27 @@ struct ProfileHubTests {
         #expect(try context.fetch(FetchDescriptor<RecentJourney>()).count == 1)
     }
 
+    @Test @MainActor func savedJourneysRemainVisibleBeyondRecentHistoryLimit() {
+        let coordinate = Coordinate(latitude: 3, longitude: 101)
+        let origin = Place(id: "origin", name: "Start", coordinate: coordinate)
+        let destination = Place(id: "destination", name: "Finish", coordinate: coordinate)
+        let journeys = (0..<14).map { index in
+            let journey = RecentJourney(origin: origin, destination: destination, stops: [],
+                                        budgetMinutes: 20, drivingDuration: 3_600,
+                                        extraDuration: 0, saved: index == 0 || index == 5)
+            journey.createdAt = Date(timeIntervalSince1970: Double(index))
+            return journey
+        }
+
+        let displayed = JourneyHistory.displayed(from: Array(journeys.reversed()))
+
+        #expect(displayed.count == 12)
+        #expect(displayed.filter { !$0.saved }.count == 10)
+        #expect(displayed.contains(where: { $0.id == journeys[5].id }))
+        #expect(displayed.last?.id == journeys[0].id)
+        #expect(!displayed.contains(where: { $0.id == journeys[1].id }))
+    }
+
     @Test @MainActor func completingEditedRouteRefreshesOneSavedJourney() throws {
         let container = try ModelContainer(for: RecentJourney.self,
                                            configurations: ModelConfiguration(isStoredInMemoryOnly: true))

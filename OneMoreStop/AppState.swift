@@ -512,8 +512,6 @@ final class AppState {
         }
         guard !cacheMatches || minutes > verifiedBudget else { return }
         discoveryTask?.cancel()
-        directions.cancelAll()
-        search.cancelAll()
         let routeID = route?.id
         budgetDiscoveryTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(350))
@@ -797,8 +795,6 @@ final class AppState {
         budgetDiscoveryTask = nil
         guard !journeyBusy else { return }
         discoveryTask?.cancel()
-        directions.cancelAll()
-        search.cancelAll()
         verifiedRouteID = nil
         verified = []
         checkingPlaces = []
@@ -979,7 +975,6 @@ final class AppState {
         guard let route else { return }
         journeyTask?.cancel()
         discoveryTask?.cancel()
-        directions.cancelAll()
         recommendations = []
         updateRadar()
         journeyBusy = true

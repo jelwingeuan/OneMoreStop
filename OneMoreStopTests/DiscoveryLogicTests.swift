@@ -422,6 +422,133 @@ struct DiscoveryLogicTests {
         #expect(searchedCenters == [first, second])
     }
 
+    @Test func expiringMemoryCacheStaysBoundedAndKeepsRecentlyUsedEntries() {
+        let start = Date(timeIntervalSince1970: 1_000_000)
+        var cache = ExpiringMemoryCache<String, String>(lifetime: 600, capacity: 2)
+        cache.set("A", for: "a", now: start)
+        cache.set("B", for: "b", now: start.addingTimeInterval(1))
+        #expect(cache.get("a", now: start.addingTimeInterval(2)) == "A")
+        cache.set("C", for: "c", now: start.addingTimeInterval(3))
+        #expect(cache.count == 2)
+        #expect(cache.get("b", now: start.addingTimeInterval(3)) == nil)
+        #expect(cache.get("a", now: start.addingTimeInterval(3)) == "A")
+        #expect(cache.get("c", now: start.addingTimeInterval(3)) == "C")
+
+        #expect(cache.get("a", now: start.addingTimeInterval(601)) == nil)
+        cache.set("D", for: "d", now: start.addingTimeInterval(604))
+        #expect(cache.count == 1)
+        #expect(cache.get("d", now: start.addingTimeInterval(604)) == "D")
+    }
+
+    #if DEBUG
+    @Test @MainActor func canceledSearchCallerDoesNotDiscardSharedResultOrCache() async throws {
+        let center = Coordinate(latitude: 3, longitude: 101)
+        let place = Place(id: "coffee", name: "Coffee", coordinate: center, category: .coffee)
+        var requests = 0
+        var resumeRequest: CheckedContinuation<[Place], Error>?
+        let search = MapSearchService(discoveryRequest: { _, _, _ in
+            requests += 1
+            return try await withCheckedThrowingContinuation { resumeRequest = $0 }
+        })
+        let first = Task { try await search.discover(around: center, radius: 2_000, category: .coffee) }
+        for _ in 0..<100 where resumeRequest == nil { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(resumeRequest != nil)
+
+        let second = Task { try await search.discover(around: center, radius: 2_000, category: .coffee) }
+        for _ in 0..<100 {
+            if search.pendingDiscoveryWaiters(around: center, radius: 2_000, category: .coffee) == 2 { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(search.pendingDiscoveryWaiters(around: center, radius: 2_000, category: .coffee) == 2)
+        first.cancel()
+        for _ in 0..<100 {
+            if search.pendingDiscoveryWaiters(around: center, radius: 2_000, category: .coffee) == 1 { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(search.pendingDiscoveryWaiters(around: center, radius: 2_000, category: .coffee) == 1)
+        resumeRequest?.resume(returning: [place])
+
+        do {
+            _ = try await first.value
+            Issue.record("The canceled caller returned a search result")
+        } catch is CancellationError { }
+        #expect(try await second.value.map(\.id) == [place.id])
+        #expect(try await search.discover(around: center, radius: 2_000, category: .coffee).map(\.id) == [place.id])
+        #expect(requests == 1)
+    }
+
+    @Test @MainActor func canceledRouteCallerDoesNotDiscardSharedResultOrCache() async throws {
+        let start = Coordinate(latitude: 3, longitude: 101)
+        let end = Coordinate(latitude: 3, longitude: 101.1)
+        let origin = Place(id: "origin", name: "Origin", coordinate: start)
+        let destination = Place(id: "destination", name: "Destination", coordinate: end)
+        let metrics = RouteMetrics(duration: 3_600, distance: 10_000, path: [start, end])
+        var requests = 0
+        var resumeRequest: CheckedContinuation<RouteMetrics, Error>?
+        let directions = DirectionsService(routeRequest: { _, _ in
+            requests += 1
+            return try await withCheckedThrowingContinuation { resumeRequest = $0 }
+        })
+        let first = Task { try await directions.route(from: origin, to: destination) }
+        for _ in 0..<100 where resumeRequest == nil { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(resumeRequest != nil)
+
+        let second = Task { try await directions.route(from: origin, to: destination) }
+        for _ in 0..<100 {
+            if directions.pendingRouteWaiters(from: origin, to: destination) == 2 { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(directions.pendingRouteWaiters(from: origin, to: destination) == 2)
+        first.cancel()
+        for _ in 0..<100 {
+            if directions.pendingRouteWaiters(from: origin, to: destination) == 1 { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(directions.pendingRouteWaiters(from: origin, to: destination) == 1)
+        resumeRequest?.resume(returning: metrics)
+
+        do {
+            _ = try await first.value
+            Issue.record("The canceled caller returned a route")
+        } catch is CancellationError { }
+        #expect(try await second.value.duration == 3_600)
+        #expect(try await directions.route(from: origin, to: destination).duration == 3_600)
+        #expect(requests == 1)
+    }
+
+    @Test @MainActor func cancelingLastSearchCallerStopsUnderlyingRequest() async throws {
+        let center = Coordinate(latitude: 3, longitude: 101)
+        let probe = SearchCancellationProbe()
+        let search = MapSearchService(discoveryRequest: { _, _, _ in
+            await probe.markStarted()
+            try await withTaskCancellationHandler {
+                try await Task.sleep(for: .seconds(2))
+                return []
+            } onCancel: {
+                Task { await probe.markCanceled() }
+            }
+        })
+        let request = Task { try await search.discover(around: center, radius: 2_000, category: .coffee) }
+        for _ in 0..<100 {
+            if await probe.wasStarted { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(await probe.wasStarted)
+        #expect(search.pendingDiscoveryWaiters(around: center, radius: 2_000, category: .coffee) == 1)
+        request.cancel()
+        do {
+            _ = try await request.value
+            Issue.record("The canceled search returned a result")
+        } catch is CancellationError { }
+        for _ in 0..<100 {
+            if await probe.wasCanceled { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(await probe.wasCanceled)
+        #expect(search.pendingDiscoveryWaiters(around: center, radius: 2_000, category: .coffee) == 0)
+    }
+    #endif
+
     @Test func globalMapGateCancelsAQueuedRequest() async throws {
         let gate = MapRequestGate()
         for _ in 0..<DiscoveryTuning.maxConcurrentRequests { try await gate.acquire() }
@@ -513,3 +640,12 @@ private final class FakeDiscovery: PlaceDiscoveryProviding {
 }
 
 private enum FakeError: Error { case missing }
+
+private actor SearchCancellationProbe {
+    private var started = false
+    private var canceled = false
+    func markStarted() { started = true }
+    func markCanceled() { canceled = true }
+    var wasStarted: Bool { started }
+    var wasCanceled: Bool { canceled }
+}

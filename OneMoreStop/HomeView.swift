@@ -299,7 +299,8 @@ private struct ExploreView: View {
             if reopenJourneyAfterGroup { showJourney = true; reopenJourneyAfterGroup = false }
         }) {
             LocalGroupView(recommendations: state.recommendations,
-                           origin: state.route?.origin, destination: state.route?.destination) { mode in
+                           origin: state.route?.origin, destination: state.route?.destination,
+                           routeID: state.route?.id) { mode in
                 state.selectMode(mode)
                 reopenJourneyAfterGroup = state.route != nil
                 showGroup = false

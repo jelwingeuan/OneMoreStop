@@ -2,9 +2,8 @@ import SwiftData
 import SwiftUI
 
 enum LocalGroupRouteContext {
-    static func key(origin: Place?, destination: Place?) -> String? {
-        guard let origin, let destination else { return nil }
-        return [origin.id, destination.id].map { "\($0.utf8.count):\($0)" }.joined()
+    static func key(routeID: UUID?) -> String? {
+        routeID.map { "route:\($0.uuidString)" }
     }
 }
 
@@ -12,6 +11,7 @@ struct LocalGroupView: View {
     let recommendations: [StopRecommendation]
     let origin: Place?
     let destination: Place?
+    let routeID: UUID?
     let usePreference: (DiscoveryMode) -> Void
 
     @State private var groupName = "Our drive"
@@ -24,7 +24,7 @@ struct LocalGroupView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \LocalGroupRecord.createdAt, order: .reverse) private var groups: [LocalGroupRecord]
 
-    private var routeContextKey: String? { LocalGroupRouteContext.key(origin: origin, destination: destination) }
+    private var routeContextKey: String? { LocalGroupRouteContext.key(routeID: routeID) }
     private var routeLabel: String? {
         guard let origin, let destination else { return nil }
         return "\(origin.name) → \(destination.name)"

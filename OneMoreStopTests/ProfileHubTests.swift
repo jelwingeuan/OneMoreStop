@@ -168,15 +168,29 @@ struct ProfileHubTests {
         let coordinate = Coordinate(latitude: 3, longitude: 101)
         let origin = Place(id: "origin-a", name: "Start A", coordinate: coordinate)
         let destination = Place(id: "destination", name: "Finish", coordinate: coordinate)
-        let otherOrigin = Place(id: "origin-b", name: "Start B", coordinate: coordinate)
-        let routeKey = try #require(LocalGroupRouteContext.key(origin: origin, destination: destination))
-        let otherKey = try #require(LocalGroupRouteContext.key(origin: otherOrigin, destination: destination))
+        let baseline = RouteMetrics(duration: 3_600, distance: 20_000, path: [coordinate])
+        let firstID = try #require(UUID(uuidString: "00000000-0000-0000-0000-000000000001"))
+        let secondID = try #require(UUID(uuidString: "00000000-0000-0000-0000-000000000002"))
+        let firstRoute = RoutePlan(id: firstID,
+                                   origin: origin, destination: destination,
+                                   baseline: baseline, createdAt: .now)
+        let secondRoute = RoutePlan(id: secondID,
+                                    origin: origin, destination: destination,
+                                    baseline: baseline, createdAt: .now)
+        let routeKey = try #require(LocalGroupRouteContext.key(
+            routeID: firstRoute.id))
+        let otherKey = try #require(LocalGroupRouteContext.key(
+            routeID: secondRoute.id))
         #expect(routeKey != otherKey)
+        #expect(LocalGroupRouteContext.key(routeID: nil) == nil)
+        let earlierEndpointKey = [origin.id, destination.id]
+            .map { "\($0.utf8.count):\($0)" }.joined()
 
         let container = try ModelContainer(for: LocalGroupRecord.self,
                                            configurations: ModelConfiguration(isStoredInMemoryOnly: true))
         let writer = ModelContext(container)
-        let legacy = LocalGroupRecord(name: "Older group")
+        let legacy = LocalGroupRecord(name: "Older group", routeContextKey: earlierEndpointKey,
+                                      routeLabel: "Start A → Finish")
         let current = LocalGroupRecord(name: "Current group", routeContextKey: routeKey,
                                        routeLabel: "Start A → Finish")
         for index in 1...6 { #expect(current.addParticipant("Person \(index)")) }

@@ -516,6 +516,29 @@ struct DiscoveryLogicTests {
         #expect(requests == 1)
     }
 
+    @Test @MainActor func nearbyPlacesKeepSeparateRoutedLegsAndCacheEntries() async throws {
+        let start = Coordinate(latitude: 3, longitude: 101)
+        let origin = Place(id: "origin", name: "Origin", coordinate: start)
+        let firstStop = Place(id: "stop-a", name: "First stop",
+                              coordinate: Coordinate(latitude: 3, longitude: 101.00001))
+        let secondStop = Place(id: "stop-b", name: "Second stop",
+                               coordinate: Coordinate(latitude: 3, longitude: 101.00004))
+        var requests = 0
+        let directions = DirectionsService(routeRequest: { from, to in
+            requests += 1
+            return RouteMetrics(duration: to.id == firstStop.id ? 600 : 1_200,
+                                distance: 1_000, path: [from.coordinate, to.coordinate])
+        })
+
+        let first = Task { try await directions.route(from: origin, to: firstStop) }
+        let second = Task { try await directions.route(from: origin, to: secondStop) }
+        #expect(try await first.value.duration == 600)
+        #expect(try await second.value.duration == 1_200)
+        #expect(try await directions.route(from: origin, to: firstStop).duration == 600)
+        #expect(try await directions.route(from: origin, to: secondStop).duration == 1_200)
+        #expect(requests == 2)
+    }
+
     @Test @MainActor func cancelingLastSearchCallerStopsUnderlyingRequest() async throws {
         let center = Coordinate(latitude: 3, longitude: 101)
         let probe = SearchCancellationProbe()

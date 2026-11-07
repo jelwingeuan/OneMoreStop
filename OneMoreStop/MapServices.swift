@@ -463,15 +463,29 @@ private extension StopCategory {
     }
 }
 
-actor RoutingCache {
-    private var values = ExpiringMemoryCache<String, RouteMetrics>(
+private struct RouteRequestKey: Hashable, Sendable {
+    let originID: String
+    let originCoordinate: Coordinate
+    let destinationID: String
+    let destinationCoordinate: Coordinate
+
+    init(from origin: Place, to destination: Place) {
+        originID = origin.id
+        originCoordinate = origin.coordinate
+        destinationID = destination.id
+        destinationCoordinate = destination.coordinate
+    }
+}
+
+private actor RoutingCache {
+    private var values = ExpiringMemoryCache<RouteRequestKey, RouteMetrics>(
         lifetime: DiscoveryTuning.cacheLifetime, capacity: DiscoveryTuning.maxCachedRoutes)
 
-    func get(_ key: String) -> RouteMetrics? {
+    func get(_ key: RouteRequestKey) -> RouteMetrics? {
         values.get(key)
     }
 
-    func set(_ value: RouteMetrics, for key: String) { values.set(value, for: key) }
+    func set(_ value: RouteMetrics, for key: RouteRequestKey) { values.set(value, for: key) }
 }
 
 @MainActor
@@ -484,7 +498,7 @@ final class DirectionsService {
 
     private let cache = RoutingCache()
     private var active: [UUID: MKDirections] = [:]
-    private var inflight: [String: RouteFlight] = [:]
+    private var inflight: [RouteRequestKey: RouteFlight] = [:]
     private let routeRequest: (@MainActor (Place, Place) async throws -> RouteMetrics)?
     private let routeOptionsRequest: (@MainActor (Place, Place) async throws -> [RouteMetrics])?
 
@@ -496,7 +510,7 @@ final class DirectionsService {
 
     func route(from origin: Place, to destination: Place) async throws -> RouteMetrics {
         try Task.checkCancellation()
-        let key = routeKey(from: origin, to: destination)
+        let key = RouteRequestKey(from: origin, to: destination)
         if let cached = await cache.get(key) {
             #if DEBUG
             await MapRequestGate.shared.recordCacheHit()
@@ -536,7 +550,7 @@ final class DirectionsService {
         }
     }
 
-    private func removeRouteWaiter(key: String, flightID: UUID, waiterID: UUID) {
+    private func removeRouteWaiter(key: RouteRequestKey, flightID: UUID, waiterID: UUID) {
         guard var flight = inflight[key], flight.id == flightID,
               flight.waiters.remove(waiterID) != nil else { return }
         if flight.waiters.isEmpty {
@@ -549,13 +563,9 @@ final class DirectionsService {
 
     #if DEBUG
     func pendingRouteWaiters(from origin: Place, to destination: Place) -> Int {
-        inflight[routeKey(from: origin, to: destination)]?.waiters.count ?? 0
+        inflight[RouteRequestKey(from: origin, to: destination)]?.waiters.count ?? 0
     }
     #endif
-
-    private func routeKey(from origin: Place, to destination: Place) -> String {
-        "\(origin.coordinate.latitude.rounded(to: 4)),\(origin.coordinate.longitude.rounded(to: 4)):\(destination.coordinate.latitude.rounded(to: 4)),\(destination.coordinate.longitude.rounded(to: 4)):car"
-    }
 
     func routeOptions(from origin: Place, to destination: Place) async throws -> [RouteMetrics] {
         if let routeOptionsRequest { return try await routeOptionsRequest(origin, destination) }
@@ -612,12 +622,5 @@ final class DirectionsService {
     enum DirectionsError: LocalizedError {
         case noRoute
         var errorDescription: String? { "No driving route is available for those places." }
-    }
-}
-
-private extension Double {
-    func rounded(to places: Int) -> Double {
-        let multiplier = pow(10, Double(places))
-        return (self * multiplier).rounded() / multiplier
     }
 }

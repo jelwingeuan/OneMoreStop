@@ -486,9 +486,12 @@ final class DirectionsService {
     private var active: [UUID: MKDirections] = [:]
     private var inflight: [String: RouteFlight] = [:]
     private let routeRequest: (@MainActor (Place, Place) async throws -> RouteMetrics)?
+    private let routeOptionsRequest: (@MainActor (Place, Place) async throws -> [RouteMetrics])?
 
-    init(routeRequest: (@MainActor (Place, Place) async throws -> RouteMetrics)? = nil) {
+    init(routeRequest: (@MainActor (Place, Place) async throws -> RouteMetrics)? = nil,
+         routeOptionsRequest: (@MainActor (Place, Place) async throws -> [RouteMetrics])? = nil) {
         self.routeRequest = routeRequest
+        self.routeOptionsRequest = routeOptionsRequest
     }
 
     func route(from origin: Place, to destination: Place) async throws -> RouteMetrics {
@@ -555,7 +558,8 @@ final class DirectionsService {
     }
 
     func routeOptions(from origin: Place, to destination: Place) async throws -> [RouteMetrics] {
-        try await calculate(from: origin, to: destination, alternates: true)
+        if let routeOptionsRequest { return try await routeOptionsRequest(origin, destination) }
+        return try await calculate(from: origin, to: destination, alternates: true)
     }
 
     private func requestRoute(from origin: Place, to destination: Place) async throws -> RouteMetrics {

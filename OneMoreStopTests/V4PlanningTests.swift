@@ -305,6 +305,38 @@ struct V4PlanningTests {
         #expect(state.route == nil)
     }
 
+    @Test func repeatingJourneyRespectsAMapPanWhileDirectionsLoad() async throws {
+        var resumeOptions: CheckedContinuation<[RouteMetrics], Error>?
+        let directions = DirectionsService(routeRequest: { _, _ in
+            Issue.record("Repeating a direct journey requested the baseline leg twice")
+            return RouteMetrics(duration: 4_000, distance: 11_000, path: [a, b])
+        }, routeOptionsRequest: { _, _ in
+            try await withCheckedThrowingContinuation { resumeOptions = $0 }
+        })
+        let state = AppState(directions: directions, liveOpportunity: FakeActivityProvider())
+        let origin = Place(id: "start", name: "Start", coordinate: a)
+        let destination = Place(id: "end", name: "End", coordinate: b)
+        let baseline = RouteMetrics(duration: 3_600, distance: 10_000, path: [a, b])
+        let saved = RecentJourney(origin: origin, destination: destination,
+                                  stops: [], budgetMinutes: 20,
+                                  drivingDuration: baseline.duration, extraDuration: 0)
+
+        await state.repeatJourney(saved)
+        for _ in 0..<100 where resumeOptions == nil {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(resumeOptions != nil)
+        state.cameraWasMovedByUser = true
+        resumeOptions?.resume(returning: [baseline])
+        for _ in 0..<100 where state.route == nil {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+
+        #expect(state.route?.destination.name == destination.name)
+        #expect(state.journey?.drivingDuration == baseline.duration)
+        #expect(state.cameraWasMovedByUser)
+    }
+
     @Test func returnPlaceRequiresRelevantDirectionAndCurrentCorridor() {
         let origin = Place(id: "old-start", name: "Old start", coordinate: a)
         let destination = Place(id: "old-end", name: "Old end", coordinate: b)
@@ -591,6 +623,93 @@ struct V4PlanningTests {
         #expect(state.currentLegOpened)
         #expect(maps.destinations == ["Coffee", "Coffee", "Coffee", "End", "End"])
         #expect(!state.canContinueToNextLeg)
+    }
+
+    @Test func editingLaterStopsKeepsTheCurrentMapsTargetAndRemovingItRequiresReopening() async throws {
+        let maps = FakeJourneyMapsLauncher()
+        let search = MapSearchService(discoveryRequest: { _, _, _ in [] })
+        let directions = DirectionsService(routeRequest: { from, to in
+            RouteMetrics(duration: 600, distance: 5_000, path: [from.coordinate, to.coordinate])
+        })
+        let state = AppState(search: search, directions: directions,
+                             liveOpportunity: FakeActivityProvider(), journeyMapsLauncher: maps)
+        let origin = Place(id: "start", name: "Start", coordinate: a)
+        let coffee = Place(id: "coffee", name: "Coffee", coordinate: Coordinate(latitude: 3, longitude: 101.025))
+        let park = Place(id: "park", name: "Park", coordinate: Coordinate(latitude: 3, longitude: 101.05))
+        let scenic = Place(id: "scenic", name: "Scenic", coordinate: Coordinate(latitude: 3, longitude: 101.075))
+        let destination = Place(id: "end", name: "Finish", coordinate: b)
+        let baseline = RouteMetrics(duration: 3_600, distance: 30_000, path: [a, b])
+        let leg = RouteMetrics(duration: 1_200, distance: 10_000, path: [a, b])
+        state.route = RoutePlan(id: UUID(), origin: origin, destination: destination,
+                                baseline: baseline, createdAt: .now)
+        state.journey = Journey(stops: [coffee, park], legs: [leg, leg, leg], baseline: baseline)
+        state.budgetMinutes = 60
+        state.startActiveJourney()
+        #expect(state.openCurrentLeg())
+        #expect(state.continueToNextLeg())
+        #expect(state.currentLegTarget?.id == park.id)
+
+        let newLeg = RouteMetrics(duration: 600, distance: 5_000, path: [a, b])
+        var candidate = StopRecommendation(place: scenic, detourTime: 0, detourDistance: 0,
+            distanceFromRoute: 0, progress: 0.8, score: 80,
+            firstLeg: newLeg, secondLeg: newLeg)
+        candidate.insertionIndex = 2
+        state.recommendations = [candidate]
+        #expect(state.addStop(candidate))
+        #expect(state.currentLegTarget?.id == park.id)
+        #expect(state.currentLegOpened)
+        #expect(state.continueToNextLeg())
+        #expect(state.currentLegTarget?.id == scenic.id)
+        #expect(maps.destinations == ["Coffee", "Park", "Scenic"])
+
+        state.removeStop(at: 2)
+        for _ in 0..<100 where state.journeyBusy {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(!state.journeyBusy)
+        #expect(state.currentLegTarget?.id == destination.id)
+        #expect(!state.currentLegOpened)
+        #expect(state.openCurrentLeg())
+        #expect(maps.destinations == ["Coffee", "Park", "Scenic", "Finish"])
+        state.endActiveJourney()
+    }
+
+    @Test func reorderingAnAlreadyContinuedStopDoesNotNavigateBackToIt() async throws {
+        let maps = FakeJourneyMapsLauncher()
+        let directions = DirectionsService(routeRequest: { from, to in
+            RouteMetrics(duration: 600, distance: 5_000, path: [from.coordinate, to.coordinate])
+        })
+        let state = AppState(search: MapSearchService(discoveryRequest: { _, _, _ in [] }),
+                             directions: directions, liveOpportunity: FakeActivityProvider(),
+                             journeyMapsLauncher: maps)
+        let origin = Place(id: "start", name: "Start", coordinate: a)
+        let coffee = Place(id: "coffee", name: "Coffee", coordinate: a)
+        let park = Place(id: "park", name: "Park", coordinate: a)
+        let scenic = Place(id: "scenic", name: "Scenic", coordinate: b)
+        let destination = Place(id: "end", name: "Finish", coordinate: b)
+        let baseline = RouteMetrics(duration: 3_600, distance: 30_000, path: [a, b])
+        let leg = RouteMetrics(duration: 900, distance: 7_500, path: [a, b])
+        state.route = RoutePlan(id: UUID(), origin: origin, destination: destination,
+                                baseline: baseline, createdAt: .now)
+        state.journey = Journey(stops: [coffee, park, scenic], legs: [leg, leg, leg, leg], baseline: baseline)
+        state.budgetMinutes = 60
+        state.startActiveJourney()
+        #expect(state.openCurrentLeg())
+        #expect(state.continueToNextLeg())
+        state.moveStop(from: 0, to: 3)
+        for _ in 0..<100 where state.journeyBusy {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(!state.journeyBusy)
+        #expect(state.journey?.stops.map(\.id) == [park.id, scenic.id, coffee.id])
+        #expect(state.currentLegTarget?.id == park.id)
+        #expect(state.currentLegOpened)
+        #expect(state.continueToNextLeg())
+        #expect(state.currentLegTarget?.id == scenic.id)
+        #expect(state.continueToNextLeg())
+        #expect(state.currentLegTarget?.id == destination.id)
+        #expect(maps.destinations == ["Coffee", "Park", "Scenic", "Finish"])
+        state.endActiveJourney()
     }
 
     @Test func spontaneousOutingCanReopenCurrentLegAndContinueExplicitly() {

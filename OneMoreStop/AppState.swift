@@ -78,6 +78,7 @@ final class AppState {
     var journeyBusy = false
     var currentLegIndex = 0
     var currentLegOpened = false
+    private var continuedPastStopIDs = Set<String>()
     var surpriseIndex = 0
     var showSurpriseAlternatives = false
     var spontaneousSuggestions = [SpontaneousPlan]()
@@ -227,7 +228,7 @@ final class AppState {
     private let location: any CurrentLocationProviding
     @ObservationIgnored private let journeyMapsLauncher: any JourneyMapsLaunching
     let search: MapSearchService
-    private let directions = DirectionsService()
+    private let directions: DirectionsService
     private var discoveryTask: Task<Void, Never>?
     private var budgetDiscoveryTask: Task<Void, Never>?
     private var routeTask: Task<Void, Never>?
@@ -250,10 +251,12 @@ final class AppState {
 
     init(location: any CurrentLocationProviding = LocationService(),
          search: MapSearchService? = nil,
+         directions: DirectionsService? = nil,
          liveOpportunity: any LiveActivityProviding = LiveOpportunityProvider(),
          journeyMapsLauncher: any JourneyMapsLaunching = SystemJourneyMapsLauncher()) {
         self.location = location
         self.search = search ?? MapSearchService()
+        self.directions = directions ?? DirectionsService()
         self.liveOpportunity = liveOpportunity
         self.journeyMapsLauncher = journeyMapsLauncher
     }
@@ -1005,10 +1008,9 @@ final class AppState {
                 : "This stop no longer fits your arrival time. Choose a later deadline."
             return false
         }
-        self.journey = updated
+        applyEditedJourney(updated)
         radar.accept(current.id)
         opportunities = radar.queue
-        resetJourneyLegHandoff()
         focusedRecommendationID = current.id
         journeyMessage = nil
         discover()
@@ -1026,11 +1028,10 @@ final class AppState {
                 : "These stops no longer fit your arrival time."
             return false
         }
-        self.journey = combination.journey
+        applyEditedJourney(combination.journey)
         radar.accept(combination.first.id)
         radar.accept(combination.second.id)
         opportunities = radar.queue
-        resetJourneyLegHandoff()
         journeyMessage = nil
         discover()
         return true
@@ -1087,9 +1088,8 @@ final class AppState {
                     discover()
                     return
                 }
-                journey = updated
+                applyEditedJourney(updated)
                 plannedVisitMinutes = retainedVisits
-                resetJourneyLegHandoff()
                 journeyBusy = false
                 discover()
             } catch is CancellationError {
@@ -1107,6 +1107,7 @@ final class AppState {
         guard places.count >= 2 else { return }
         let selectedOrigin = origin
         let selectedDestination = destination
+        cameraWasMovedByUser = false
         if saved.originWasCurrent {
             do {
                 let position = try await location.currentLocation()
@@ -1146,11 +1147,15 @@ final class AppState {
                 let plan = RoutePlan(id: UUID(), origin: origin, destination: destination,
                                      baseline: baseline, createdAt: .now, options: options)
                 let stops = Array(places.dropFirst(2))
-                let points = [origin] + stops + [destination]
                 var legs = [RouteMetrics]()
-                for index in 0..<(points.count - 1) {
-                    try Task.checkCancellation()
-                    legs.append(try await directions.route(from: points[index], to: points[index + 1]))
+                if stops.isEmpty {
+                    legs = [baseline]
+                } else {
+                    let points = [origin] + stops + [destination]
+                    for index in 0..<(points.count - 1) {
+                        try Task.checkCancellation()
+                        legs.append(try await directions.route(from: points[index], to: points[index + 1]))
+                    }
                 }
                 try Task.checkCancellation()
                 route = plan
@@ -1159,7 +1164,7 @@ final class AppState {
                 if let journey, journey.extraDuration > Double(budgetMinutes * 60) + 1 {
                     journeyMessage = "Current routes put this journey over its saved time budget."
                 }
-                fitCamera(to: baseline.path)
+                if !cameraWasMovedByUser { fitCamera(to: baseline.path) }
                 discover()
             } catch {
                 guard !Task.isCancelled else { return }
@@ -1264,13 +1269,44 @@ final class AppState {
     }
 
     var canContinueToNextLeg: Bool {
-        guard let journey else { return false }
-        return currentLegOpened && currentLegIndex + 1 < journey.legs.count
+        currentLegOpened && nextJourneyLegIndex != nil
+    }
+
+    private var nextJourneyLegIndex: Int? {
+        guard let route, let journey else { return nil }
+        let endpoints = journey.stops + [route.destination]
+        return endpoints.indices.first {
+            $0 > currentLegIndex && !continuedPastStopIDs.contains(endpoints[$0].id)
+        }
+    }
+
+    private func applyEditedJourney(_ updated: Journey) {
+        guard let route, let previous = journey else {
+            journey = updated
+            resetJourneyLegHandoff()
+            return
+        }
+        let previousTarget = currentLegTarget
+        let wasOpened = currentLegOpened
+        continuedPastStopIDs.formUnion(previous.stops.prefix(currentLegIndex).map(\.id))
+        continuedPastStopIDs.formIntersection(Set(updated.stops.map(\.id)))
+        journey = updated
+
+        let endpoints = updated.stops + [route.destination]
+        guard let nextIndex = endpoints.indices.first(where: {
+            !continuedPastStopIDs.contains(endpoints[$0].id)
+        }) else {
+            resetJourneyLegHandoff()
+            return
+        }
+        currentLegIndex = nextIndex
+        currentLegOpened = wasOpened && previousTarget?.id == endpoints[nextIndex].id
     }
 
     private func resetJourneyLegHandoff() {
         currentLegIndex = 0
         currentLegOpened = false
+        continuedPastStopIDs = []
     }
 
     @discardableResult
@@ -1285,12 +1321,19 @@ final class AppState {
 
     @discardableResult
     func continueToNextLeg() -> Bool {
-        guard canContinueToNextLeg else { return false }
-        currentLegIndex += 1
+        guard currentLegOpened, let nextIndex = nextJourneyLegIndex else { return false }
+        let previousIndex = currentLegIndex
+        let previousTarget = currentLegTarget
+        let previousContinuedStops = continuedPastStopIDs
+        if let previousTarget, journey?.stops.contains(where: { $0.id == previousTarget.id }) == true {
+            continuedPastStopIDs.insert(previousTarget.id)
+        }
+        currentLegIndex = nextIndex
         currentLegOpened = false
         guard openCurrentLeg() else {
-            currentLegIndex -= 1
+            currentLegIndex = previousIndex
             currentLegOpened = true
+            continuedPastStopIDs = previousContinuedStops
             return false
         }
         return true

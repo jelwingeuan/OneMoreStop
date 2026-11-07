@@ -18,7 +18,7 @@ struct DiscoveryLogicTests {
         let now = start.addingTimeInterval(60 * 60)
         let budget = ActiveDeadlineBudget(deadline: start.addingTimeInterval(150 * 60),
                                           now: now, baselineDriving: 120 * 60,
-                                          journeyDriving: 120 * 60, routeProgress: 0.5,
+                                          journeyDriving: 120 * 60, estimatedRemainingDriving: 60 * 60,
                                           remainingPlannedVisits: 0)
         #expect(budget.estimatedRemainingDriving == 60 * 60)
         #expect(budget.remainingMargin == 30 * 60)
@@ -29,7 +29,7 @@ struct DiscoveryLogicTests {
         let now = Date(timeIntervalSince1970: 1_000_000)
         let budget = ActiveDeadlineBudget(deadline: now.addingTimeInterval(60 * 60),
                                           now: now, baselineDriving: 60 * 60,
-                                          journeyDriving: 72 * 60, routeProgress: 0.5,
+                                          journeyDriving: 72 * 60, estimatedRemainingDriving: 36 * 60,
                                           remainingPlannedVisits: 10 * 60)
         #expect(budget.estimatedRemainingDriving == 36 * 60)
         #expect(budget.remainingMargin == 14 * 60)
@@ -38,27 +38,99 @@ struct DiscoveryLogicTests {
         #expect(27 * 60 > budget.allowedTotalDetour)
     }
 
-    @Test func activeDeadlineClampsProgressAndOverdueAllowance() {
+    @Test func activeDeadlineClampsInvalidEstimateAndOverdueAllowance() {
         let now = Date(timeIntervalSince1970: 1_000_000)
         let deadline = now.addingTimeInterval(30 * 60)
         let overdue = ActiveDeadlineBudget(deadline: deadline, now: now,
                                             baselineDriving: 60 * 60, journeyDriving: 72 * 60,
-                                            routeProgress: 0.5, remainingPlannedVisits: 0)
+                                            estimatedRemainingDriving: 36 * 60, remainingPlannedVisits: 0)
         #expect(overdue.remainingMargin == 0)
         #expect(overdue.allowedTotalDetour == 6 * 60)
 
-        let beforeStart = ActiveDeadlineBudget(deadline: deadline, now: now,
-                                                baselineDriving: 60 * 60, journeyDriving: 72 * 60,
-                                                routeProgress: -0.5, remainingPlannedVisits: 0)
-        let unknownProgress = ActiveDeadlineBudget(deadline: deadline, now: now,
-                                                    baselineDriving: 60 * 60, journeyDriving: 72 * 60,
-                                                    routeProgress: .nan, remainingPlannedVisits: 0)
-        #expect(beforeStart.estimatedRemainingDriving == 72 * 60)
-        #expect(unknownProgress.estimatedRemainingDriving == beforeStart.estimatedRemainingDriving)
-        let pastFinish = ActiveDeadlineBudget(deadline: deadline, now: now,
-                                               baselineDriving: 60 * 60, journeyDriving: 72 * 60,
-                                               routeProgress: 1.5, remainingPlannedVisits: 0)
-        #expect(pastFinish.estimatedRemainingDriving == 0)
+        let unknown = ActiveDeadlineBudget(deadline: deadline, now: now,
+                                            baselineDriving: 60 * 60, journeyDriving: 72 * 60,
+                                            estimatedRemainingDriving: .nan, remainingPlannedVisits: 0)
+        #expect(unknown.estimatedRemainingDriving == 72 * 60)
+        #expect(unknown.remainingMargin == 0)
+        #expect(unknown.allowedTotalDetour == 0)
+        let negative = ActiveDeadlineBudget(deadline: deadline, now: now,
+                                             baselineDriving: 60 * 60, journeyDriving: 72 * 60,
+                                             estimatedRemainingDriving: -10, remainingPlannedVisits: 0)
+        #expect(negative.estimatedRemainingDriving == 0)
+        #expect(negative.remainingMargin == 30 * 60)
+    }
+
+    @Test func remainingDrivingUsesEachLegsRoutedDuration() {
+        let start = Coordinate(latitude: 3, longitude: 101)
+        let middle = Coordinate(latitude: 3, longitude: 101.05)
+        let end = Coordinate(latitude: 3, longitude: 101.1)
+        let first = RouteMetrics(duration: 10 * 60, distance: 5_000, path: [start, middle])
+        let second = RouteMetrics(duration: 50 * 60, distance: 5_000, path: [middle, end])
+        let stop = Place(id: "middle", name: "Middle", coordinate: middle)
+        let journey = Journey(stops: [stop], legs: [first, second],
+                              baseline: RouteMetrics(duration: 60 * 60, distance: 10_000,
+                                                     path: [start, middle, end]))
+
+        #expect(abs(JourneyDrivingProgress.remaining(in: journey, routeProgress: 0.75) - 25 * 60) < 1)
+        #expect(JourneyDrivingProgress.remaining(in: journey, routeProgress: -1) == 60 * 60)
+        #expect(JourneyDrivingProgress.remaining(in: journey, routeProgress: .nan) == 60 * 60)
+        #expect(JourneyDrivingProgress.remaining(in: journey, routeProgress: 2) == 0)
+    }
+
+    @Test func aStopBehindTheTravelerHasNoVerifiedRemainingRoute() {
+        let start = Coordinate(latitude: 3, longitude: 101)
+        let middle = Coordinate(latitude: 3, longitude: 101.05)
+        let end = Coordinate(latitude: 3, longitude: 101.1)
+        let baseline = RouteMetrics(duration: 60 * 60, distance: 10_000, path: [start, end])
+        let current = Journey(stops: [], legs: [baseline], baseline: baseline)
+        let stop = Place(id: "stop", name: "Stop", coordinate: middle)
+        let proposed = Journey(stops: [stop], legs: [
+            RouteMetrics(duration: 45 * 60, distance: 6_000, path: [start, middle]),
+            RouteMetrics(duration: 30 * 60, distance: 6_000, path: [middle, end])
+        ], baseline: baseline)
+
+        #expect(JourneyDrivingProgress.remainingAfterEdit(current: current, proposed: proposed,
+            destinationID: "destination", routeProgress: 0.75) == nil)
+    }
+
+    @Test func pastLegSavingsDoNotHideAnUpcomingSlowerLeg() {
+        let start = Coordinate(latitude: 3, longitude: 101)
+        let middle = Coordinate(latitude: 3, longitude: 101.05)
+        let end = Coordinate(latitude: 3, longitude: 101.1)
+        let stop = Place(id: "middle", name: "Middle", coordinate: middle)
+        let baseline = RouteMetrics(duration: 70 * 60, distance: 10_000, path: [start, middle, end])
+        let current = Journey(stops: [stop], legs: [
+            RouteMetrics(duration: 60 * 60, distance: 5_000, path: [start, middle]),
+            RouteMetrics(duration: 10 * 60, distance: 5_000, path: [middle, end])
+        ], baseline: baseline)
+        let proposed = Journey(stops: [stop], legs: [
+            RouteMetrics(duration: 40 * 60, distance: 5_000, path: [start, middle]),
+            RouteMetrics(duration: 20 * 60, distance: 5_000, path: [middle, end])
+        ], baseline: baseline)
+
+        #expect(abs((JourneyDrivingProgress.remainingAfterEdit(current: current, proposed: proposed,
+            destinationID: "destination", routeProgress: 0.75) ?? .infinity) - 10 * 60) < 1)
+    }
+
+    @Test func unchangedCurrentLegAllowsFutureRouteSavings() {
+        let start = Coordinate(latitude: 3, longitude: 101)
+        let middle = Coordinate(latitude: 3, longitude: 101.05)
+        let later = Coordinate(latitude: 3, longitude: 101.075)
+        let end = Coordinate(latitude: 3, longitude: 101.1)
+        let first = RouteMetrics(duration: 10 * 60, distance: 5_000, path: [start, middle])
+        let second = RouteMetrics(duration: 50 * 60, distance: 5_000, path: [middle, end])
+        let middleStop = Place(id: "middle", name: "Middle", coordinate: middle)
+        let laterStop = Place(id: "later", name: "Later", coordinate: later)
+        let baseline = RouteMetrics(duration: 60 * 60, distance: 10_000, path: [start, middle, end])
+        let current = Journey(stops: [middleStop], legs: [first, second], baseline: baseline)
+        let proposed = Journey(stops: [middleStop, laterStop], legs: [
+            first,
+            RouteMetrics(duration: 20 * 60, distance: 2_500, path: [middle, later]),
+            RouteMetrics(duration: 20 * 60, distance: 2_500, path: [later, end])
+        ], baseline: baseline)
+
+        #expect(abs((JourneyDrivingProgress.remainingAfterEdit(current: current, proposed: proposed,
+            destinationID: "destination", routeProgress: 0.25) ?? .infinity) - 45 * 60) < 1)
     }
 
     @Test func routeProgressDistinguishesAheadAndBehind() {

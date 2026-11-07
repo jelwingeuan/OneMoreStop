@@ -474,6 +474,191 @@ struct V4PlanningTests {
         #expect(!state.addStop(recommendation))
     }
 
+    @Test func activeDeadlineRejectsTheFullCostOfAStopAhead() {
+        let origin = Place(id: "start", name: "Start", coordinate: a)
+        let destination = Place(id: "end", name: "End", coordinate: b)
+        let middle = Coordinate(latitude: 3, longitude: 101.085)
+        let stop = Place(id: "stop", name: "Stop", coordinate: middle)
+        let baseline = RouteMetrics(duration: 60 * 60, distance: 10_000, path: [a, b])
+        let first = RouteMetrics(duration: 45 * 60, distance: 6_000, path: [a, middle])
+        let second = RouteMetrics(duration: 30 * 60, distance: 6_000, path: [middle, b])
+        let recommendation = StopRecommendation(place: stop, detourTime: 15 * 60,
+            detourDistance: 2_000, distanceFromRoute: 0, progress: 0.85, score: 80,
+            firstLeg: first, secondLeg: second)
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let state = AppState(liveOpportunity: FakeActivityProvider())
+        state.route = RoutePlan(id: UUID(), origin: origin, destination: destination,
+                                baseline: baseline, createdAt: now)
+        state.journey = Journey(stops: [], legs: [baseline], baseline: baseline)
+        state.recommendations = [recommendation]
+        state.clockNow = now
+        state.activeJourney = true
+        state.travelerProgress = 0.75
+        state.timeBudget = .arriveBy(now.addingTimeInterval(25 * 60))
+
+        #expect(state.remainingTime == 10 * 60)
+        #expect(!state.addStop(recommendation))
+        #expect(state.journey?.stops.isEmpty == true)
+        #expect(state.journeyMessage?.contains("arrival time") == true)
+    }
+
+    @Test func activeDeadlineAcceptsAnAheadStopOnlyWhenItsRemainingDriveFits() {
+        let origin = Place(id: "start", name: "Start", coordinate: a)
+        let destination = Place(id: "end", name: "End", coordinate: b)
+        let ahead = Coordinate(latitude: 3, longitude: 101.085)
+        let stop = Place(id: "stop-ahead", name: "Stop ahead", coordinate: ahead)
+        let baseline = RouteMetrics(duration: 60 * 60, distance: 10_000, path: [a, b])
+        let first = RouteMetrics(duration: 50 * 60, distance: 8_500, path: [a, ahead])
+        let second = RouteMetrics(duration: 15 * 60, distance: 1_500, path: [ahead, b])
+        let recommendation = StopRecommendation(place: stop, detourTime: 5 * 60,
+            detourDistance: 0, distanceFromRoute: 0, progress: 0.85, score: 80,
+            firstLeg: first, secondLeg: second)
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let state = AppState(search: MapSearchService(discoveryRequest: { _, _, _ in [] }),
+                             liveOpportunity: FakeActivityProvider())
+        state.route = RoutePlan(id: UUID(), origin: origin, destination: destination,
+                                baseline: baseline, createdAt: now)
+        state.journey = Journey(stops: [], legs: [baseline], baseline: baseline)
+        state.recommendations = [recommendation]
+        state.clockNow = now
+        state.activeJourney = true
+        state.travelerProgress = 0.75
+
+        state.timeBudget = .arriveBy(now.addingTimeInterval(20 * 60))
+        #expect(!state.addStop(recommendation))
+        state.timeBudget = .arriveBy(now.addingTimeInterval(25 * 60))
+        #expect(state.addStop(recommendation))
+        #expect(state.selectedStops.map(\.id) == [stop.id])
+    }
+
+    @Test func activeSpareBudgetRejectsAStopAlreadyPassed() {
+        let origin = Place(id: "start", name: "Start", coordinate: a)
+        let destination = Place(id: "end", name: "End", coordinate: b)
+        let behind = Coordinate(latitude: 3, longitude: 101.05)
+        let stop = Place(id: "behind", name: "Behind", coordinate: behind)
+        let baseline = RouteMetrics(duration: 60 * 60, distance: 10_000, path: [a, b])
+        let recommendation = StopRecommendation(place: stop, detourTime: 0,
+            detourDistance: 0, distanceFromRoute: 0, progress: 0.5, score: 80,
+            firstLeg: RouteMetrics(duration: 30 * 60, distance: 5_000, path: [a, behind]),
+            secondLeg: RouteMetrics(duration: 30 * 60, distance: 5_000, path: [behind, b]))
+        let state = AppState(liveOpportunity: FakeActivityProvider())
+        state.route = RoutePlan(id: UUID(), origin: origin, destination: destination,
+                                baseline: baseline, createdAt: .now)
+        state.journey = Journey(stops: [], legs: [baseline], baseline: baseline)
+        state.recommendations = [recommendation]
+        state.budgetMinutes = 60
+        state.activeJourney = true
+        state.travelerProgress = 0.75
+
+        #expect(!state.addStop(recommendation))
+        #expect(state.selectedStops.isEmpty)
+        #expect(state.journeyMessage?.contains("current position") == true)
+    }
+
+    @Test func activeEditRemapsProgressBeforeUpdatingArrivalAndWallet() throws {
+        let origin = Place(id: "start", name: "Start", coordinate: a)
+        let destination = Place(id: "end", name: "End", coordinate: b)
+        let traveler = Coordinate(latitude: 3, longitude: 101.075)
+        let stopCoordinate = Coordinate(latitude: 3.01, longitude: 101.085)
+        let stop = Place(id: "detour", name: "Detour", coordinate: stopCoordinate)
+        let baseline = RouteMetrics(duration: 60 * 60, distance: 10_000, path: [a, b])
+        let first = RouteMetrics(duration: 50 * 60, distance: 10_000,
+                                 path: [a, traveler, stopCoordinate])
+        let second = RouteMetrics(duration: 20 * 60, distance: 2_500,
+                                  path: [stopCoordinate, b])
+        let original = Journey(stops: [], legs: [baseline], baseline: baseline)
+        let proposed = Journey(stops: [stop], legs: [first, second], baseline: baseline)
+        let expectedRemaining = try #require(JourneyDrivingProgress.remainingAfterEdit(
+            current: original, proposed: proposed, destinationID: destination.id, routeProgress: 0.75))
+        let recommendation = StopRecommendation(place: stop, detourTime: 10 * 60,
+            detourDistance: 2_500, distanceFromRoute: 1_000, progress: 0.85, score: 80,
+            firstLeg: first, secondLeg: second)
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let state = AppState(search: MapSearchService(discoveryRequest: { _, _, _ in [] }),
+                             liveOpportunity: FakeActivityProvider())
+        state.route = RoutePlan(id: UUID(), origin: origin, destination: destination,
+                                baseline: baseline, createdAt: now)
+        state.journey = original
+        state.recommendations = [recommendation]
+        state.clockNow = now
+        state.activeJourney = true
+        state.travelerProgress = 0.75
+        state.timeBudget = .arriveBy(now.addingTimeInterval(50 * 60))
+
+        #expect(state.addStop(recommendation))
+        #expect(state.travelerProgress < 0.75)
+        #expect(abs((state.activeDrivingArrival ?? now).timeIntervalSince(now) - expectedRemaining) < 1)
+        #expect(abs(state.remainingTime - (50 * 60 - expectedRemaining)) < 1)
+    }
+
+    @Test func changedActiveRouteHidesArrivalUntilLocationRefresh() async throws {
+        let origin = Place(id: "start", name: "Start", coordinate: a)
+        let destination = Place(id: "end", name: "End", coordinate: b)
+        let middle = Coordinate(latitude: 3, longitude: 101.05)
+        let stop = Place(id: "stop", name: "Stop", coordinate: middle)
+        let detour = Coordinate(latitude: 4, longitude: 101.05)
+        let baseline = RouteMetrics(duration: 60 * 60, distance: 10_000, path: [a, b])
+        let directions = DirectionsService(routeRequest: { _, _ in
+            RouteMetrics(duration: 60 * 60, distance: 15_000, path: [a, detour, b])
+        })
+        let state = AppState(search: MapSearchService(discoveryRequest: { _, _, _ in [] }),
+                             directions: directions, liveOpportunity: FakeActivityProvider())
+        state.route = RoutePlan(id: UUID(), origin: origin, destination: destination,
+                                baseline: baseline, createdAt: .now)
+        state.journey = Journey(stops: [stop], legs: [
+            RouteMetrics(duration: 30 * 60, distance: 5_000, path: [a, middle]),
+            RouteMetrics(duration: 30 * 60, distance: 5_000, path: [middle, b])
+        ], baseline: baseline)
+        state.budgetMinutes = 60
+        state.activeJourney = true
+        state.travelerProgress = 0.75
+        state.removeStop(at: 0)
+        for _ in 0..<100 where state.journeyBusy {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+
+        #expect(!state.journeyBusy)
+        #expect(state.journey?.stops.isEmpty == true)
+        #expect(!state.isTravelerOnRoute)
+        #expect(state.activeDrivingArrival == nil)
+        #expect(state.recommendations.isEmpty)
+    }
+
+    @Test func returningToRouteRefreshesOpportunitiesEvenWithinCooldown() async throws {
+        let location = SuspendedLocationProvider()
+        var searches = 0
+        let search = MapSearchService(discoveryRequest: { _, _, _ in
+            searches += 1
+            return []
+        })
+        let state = AppState(location: location, search: search,
+                             liveOpportunity: FakeActivityProvider())
+        let origin = Place(id: "start", name: "Start", coordinate: a)
+        let destination = Place(id: "end", name: "End", coordinate: b)
+        let baseline = RouteMetrics(duration: 60 * 60, distance: 10_000, path: [a, b])
+        state.route = RoutePlan(id: UUID(), origin: origin, destination: destination,
+                                baseline: baseline, createdAt: .now)
+        state.journey = Journey(stops: [], legs: [baseline], baseline: baseline)
+        state.activeJourney = true
+        state.isTravelerOnRoute = false
+        state.travelerProgress = 0.5
+        state.lastActiveDiscoveryAt = .now
+
+        let request = Task { await state.refreshTravelerProgress() }
+        await location.waitUntilRequested()
+        location.resolve(Coordinate(latitude: 3, longitude: 101.05))
+        await request.value
+        for _ in 0..<100 where state.phase != .noResults {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+
+        #expect(state.isTravelerOnRoute)
+        #expect(state.activeMessage == nil)
+        #expect(searches > 0)
+        #expect(state.phase == .noResults)
+        state.endActiveJourney()
+    }
+
     @Test func rediscoveryRemovesAnUnavailableOpportunityImmediately() {
         let origin = Place(id: "start", name: "Start", coordinate: a)
         let destination = Place(id: "end", name: "End", coordinate: b)
@@ -543,13 +728,22 @@ struct V4PlanningTests {
         state.activeJourney = true
         state.travelerProgress = 0.5
 
-        #expect(state.remainingTime == 15 * 60)
-        #expect(state.allowedExtraDriving == 15 * 60)
-        #expect(state.profileRemainingTime(at: now) == 15 * 60)
+        #expect(abs(state.remainingTime - 15 * 60) < 1)
+        #expect(abs(state.allowedExtraDriving - 15 * 60) < 1)
+        #expect(abs(state.profileRemainingTime(at: now) - 15 * 60) < 1)
+        #expect(state.drivingArrival != nil)
+        #expect(state.plannedArrival != nil)
+        #expect(abs((state.drivingArrival ?? now).timeIntervalSince(now) - 60 * 60) < 1)
+        #expect(abs((state.plannedArrival ?? now).timeIntervalSince(now) - 75 * 60) < 1)
 
         state.travelerProgress = 0.75
-        #expect(state.remainingTime == 60 * 60)
-        #expect(state.allowedExtraDriving == 60 * 60)
+        #expect(abs(state.remainingTime - 60 * 60) < 1)
+        #expect(abs(state.allowedExtraDriving - 60 * 60) < 1)
+        #expect(state.drivingArrival != nil)
+        #expect(state.plannedArrival != nil)
+        #expect(abs((state.drivingArrival ?? now).timeIntervalSince(now) - 30 * 60) < 1)
+        #expect(abs((state.plannedArrival ?? now).timeIntervalSince(state.drivingArrival ?? now)) < 1)
+        #expect(state.plannedVisitSecondsRemaining == 0)
     }
 
     @Test func startingAnAlreadyActiveJourneyPreservesSessionChoices() {

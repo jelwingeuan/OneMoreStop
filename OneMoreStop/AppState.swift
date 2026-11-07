@@ -120,18 +120,24 @@ final class AppState {
     var plannedVisitSeconds: TimeInterval {
         selectedStops.reduce(0) { $0 + Double(plannedVisitMinutes[$1.id, default: 0] * 60) }
     }
+    var plannedVisitSecondsRemaining: TimeInterval {
+        activeJourney ? remainingPlannedVisitSeconds(for: plannedVisitMinutes) : plannedVisitSeconds
+    }
     private func remainingPlannedVisitSeconds(for visits: [String: Int],
                                               in proposedJourney: Journey? = nil) -> TimeInterval {
-        guard activeJourney, isTravelerOnRoute, let journey = proposedJourney ?? self.journey,
-              journey.legs.count > journey.stops.count, journey.drivingDistance > 0 else {
+        guard activeJourney, isTravelerOnRoute, let currentJourney = journey else {
             return Double(visits.values.reduce(0, +) * 60)
         }
-        var distanceToStop = 0.0
-        return journey.stops.enumerated().reduce(0.0) { remaining, entry in
-            distanceToStop += journey.legs[entry.offset].distance
-            let progress = distanceToStop / journey.drivingDistance
-            return remaining + (progress + 0.02 >= travelerProgress
-                ? Double(visits[entry.element.id, default: 0] * 60) : 0)
+        let currentStopProgress = currentJourney.stops.enumerated().reduce(into: [String: Double]()) {
+            positions, entry in
+            positions[entry.element.id] = JourneyDrivingProgress.progress(
+                atStop: entry.offset, in: currentJourney)
+        }
+        return (proposedJourney ?? currentJourney).stops.reduce(0.0) { remaining, stop in
+            guard currentStopProgress[stop.id].map({ $0 + 0.02 < travelerProgress }) != true else {
+                return remaining
+            }
+            return remaining + Double(visits[stop.id, default: 0] * 60)
         }
     }
     private func activeDeadlineBudget(at date: Date, visits: [String: Int]? = nil) -> ActiveDeadlineBudget? {
@@ -140,7 +146,8 @@ final class AppState {
         return ActiveDeadlineBudget(deadline: deadline, now: date,
                                     baselineDriving: route.baseline.duration,
                                     journeyDriving: journey.drivingDuration,
-                                    routeProgress: travelerProgress,
+                                    estimatedRemainingDriving: JourneyDrivingProgress.remaining(
+                                        in: journey, routeProgress: travelerProgress),
                                     remainingPlannedVisits: remainingPlannedVisitSeconds(for: visits ?? plannedVisitMinutes))
     }
     var allowedExtraDriving: TimeInterval {
@@ -158,14 +165,32 @@ final class AppState {
     private func fitsDeadline(_ proposedJourney: Journey, visits: [String: Int]) -> Bool {
         guard case .arriveBy(let deadline) = timeBudget else { return true }
         guard !activeJourney || isTravelerOnRoute else { return false }
-        let progress = travelerProgress.isFinite ? min(max(travelerProgress, 0), 1) : 0
-        let remainingDriving = activeJourney
-            ? proposedJourney.drivingDuration * (1 - progress) : proposedJourney.drivingDuration
+        let remainingDriving: TimeInterval
+        if activeJourney {
+            guard let estimated = activeProposedRemainingDriving(proposedJourney),
+                  estimated.isFinite else { return false }
+            remainingDriving = estimated
+        } else {
+            remainingDriving = proposedJourney.drivingDuration
+        }
         return deadline.timeIntervalSince(clockNow) + 1 >= remainingDriving +
             remainingPlannedVisitSeconds(for: visits, in: proposedJourney)
     }
 
+    private func activeProposedRemainingDriving(_ proposedJourney: Journey) -> TimeInterval? {
+        guard activeJourney else { return nil }
+        guard isTravelerOnRoute, let journey, let route else { return nil }
+        return JourneyDrivingProgress.remainingAfterEdit(current: journey, proposed: proposedJourney,
+            destinationID: route.destination.id, routeProgress: travelerProgress)
+    }
+
+    private func activeEditMessage(for proposedJourney: Journey) -> String? {
+        guard activeJourney, activeProposedRemainingDriving(proposedJourney)?.isFinite != true else { return nil }
+        return "This route change can’t be verified from your current position. Choose stops ahead on the route."
+    }
+
     private func fitsSelectedTimeBudget(_ proposedJourney: Journey, visits: [String: Int]) -> Bool {
+        if activeJourney, activeProposedRemainingDriving(proposedJourney)?.isFinite != true { return false }
         switch timeBudget {
         case .spare(let minutes):
             return proposedJourney.extraDuration <= Double(max(0, minutes) * 60) + 1
@@ -189,18 +214,24 @@ final class AppState {
         guard let journey, let proposed = proposedJourney(adding: result, to: journey) else { return false }
         return fitsDeadline(proposed, visits: plannedVisitMinutes)
     }
-    var drivingArrival: Date? { journey.map { clockNow.addingTimeInterval($0.drivingDuration) } }
+    var drivingArrival: Date? {
+        guard let journey else { return nil }
+        if activeJourney { return activeDrivingArrival }
+        return clockNow.addingTimeInterval(journey.drivingDuration)
+    }
     var activeDrivingArrival: Date? {
         guard isTravelerOnRoute, let journey else { return nil }
-        return clockNow.addingTimeInterval(journey.drivingDuration * max(0, 1 - travelerProgress))
+        return clockNow.addingTimeInterval(JourneyDrivingProgress.remaining(
+            in: journey, routeProgress: travelerProgress))
     }
     func profileDrivingArrival(at date: Date) -> Date? {
         guard let journey else { return nil }
         guard activeJourney else { return date.addingTimeInterval(journey.drivingDuration) }
         guard isTravelerOnRoute else { return nil }
-        return date.addingTimeInterval(journey.drivingDuration * max(0, 1 - travelerProgress))
+        return date.addingTimeInterval(JourneyDrivingProgress.remaining(
+            in: journey, routeProgress: travelerProgress))
     }
-    var plannedArrival: Date? { drivingArrival?.addingTimeInterval(plannedVisitSeconds) }
+    var plannedArrival: Date? { drivingArrival?.addingTimeInterval(plannedVisitSecondsRemaining) }
     var profileOriginalAllowance: TimeInterval {
         switch timeBudget {
         case .spare(let minutes): Double(minutes * 60)
@@ -345,13 +376,21 @@ final class AppState {
             guard projection.isOnRoute else {
                 if activeJourney { activeMessage = "You may be off the planned route. Recheck the route when safe." }
                 isTravelerOnRoute = false
+                discoveryTask?.cancel()
+                discoveryID = UUID()
+                recommendations = []
+                checkingPlaces = []
+                combinations = []
+                chains = []
+                verified = []
+                verifiedRouteID = nil
+                phase = .loaded
+                radar.reset()
                 opportunities = []
-                if activeJourney, let content = liveActivityContent {
-                    Task { [liveOpportunity] in await liveOpportunity.update(content) }
-                }
                 return
             }
-            if !isTravelerOnRoute { activeMessage = nil }
+            let returnedToRoute = !isTravelerOnRoute
+            if returnedToRoute { activeMessage = nil }
             isTravelerOnRoute = true
             if activeJourney {
                 let now = Date.now
@@ -362,11 +401,11 @@ final class AppState {
                 }
             }
             let progress = projection.fraction
-            if abs(progress - travelerProgress) > 0.02 {
+            if returnedToRoute || abs(progress - travelerProgress) > 0.02 {
                 travelerProgress = progress
                 if activeJourney {
                     let now = Date.now
-                    if lastActiveDiscoveryAt.map({ now.timeIntervalSince($0) >= 600 }) ?? true {
+                    if returnedToRoute || (lastActiveDiscoveryAt.map({ now.timeIntervalSince($0) >= 600 }) ?? true) {
                         lastActiveDiscoveryAt = now
                         discover()
                     }
@@ -879,7 +918,7 @@ final class AppState {
         combinations = []
         chains = []
         evNearby = [:]
-        guard let route, let journey, canAddStop else {
+        guard let route, let journey, canAddStop, !activeJourney || isTravelerOnRoute else {
             recommendations = []
             opportunities = []
             radar.reset()
@@ -1003,9 +1042,9 @@ final class AppState {
               let current = recommendations.first(where: { $0.id == recommendation.id }),
               let updated = proposedJourney(adding: current, to: journey) else { return false }
         guard fitsSelectedTimeBudget(updated, visits: plannedVisitMinutes) else {
-            journeyMessage = timeBudget.deadline == nil
+            journeyMessage = activeEditMessage(for: updated) ?? (timeBudget.deadline == nil
                 ? "This stop now exceeds your extra driving time budget. Try a wider budget."
-                : "This stop no longer fits your arrival time. Choose a later deadline."
+                : "This stop no longer fits your arrival time. Choose a later deadline.")
             return false
         }
         applyEditedJourney(updated)
@@ -1023,9 +1062,9 @@ final class AppState {
               journey.stops.map(\.id) == combination.originalStopIDs,
               combination.journey.stops.count <= DiscoveryTuning.maxStops else { return false }
         guard fitsSelectedTimeBudget(combination.journey, visits: plannedVisitMinutes) else {
-            journeyMessage = timeBudget.deadline == nil
+            journeyMessage = activeEditMessage(for: combination.journey) ?? (timeBudget.deadline == nil
                 ? "These stops now exceed your extra driving time budget."
-                : "These stops no longer fit your arrival time."
+                : "These stops no longer fit your arrival time.")
             return false
         }
         applyEditedJourney(combination.journey)
@@ -1083,7 +1122,8 @@ final class AppState {
                 let retainedVisits = plannedVisitMinutes.filter { key, _ in stops.contains { $0.id == key } }
                 guard fitsSelectedTimeBudget(updated, visits: retainedVisits) ||
                         stops.count < (journey?.stops.count ?? 0) else {
-                    journeyMessage = "That order exceeds your time budget. Your previous trip is still here."
+                    journeyMessage = activeEditMessage(for: updated) ??
+                        "That order exceeds your time budget. Your previous trip is still here."
                     journeyBusy = false
                     discover()
                     return
@@ -1291,6 +1331,19 @@ final class AppState {
         continuedPastStopIDs.formUnion(previous.stops.prefix(currentLegIndex).map(\.id))
         continuedPastStopIDs.formIntersection(Set(updated.stops.map(\.id)))
         journey = updated
+        if activeJourney, isTravelerOnRoute, travelerProgress > 0 {
+            if JourneyDrivingProgress.remainingAfterEdit(current: previous, proposed: updated,
+                    destinationID: route.destination.id, routeProgress: travelerProgress) != nil,
+               let mapped = JourneyDrivingProgress.mappedProgress(
+                    from: previous, onto: updated, routeProgress: travelerProgress) {
+                travelerProgress = mapped
+            } else {
+                isTravelerOnRoute = false
+                activeMessage = "Route changed. Refresh your location to update arrival and opportunities."
+                recommendations = []
+                opportunities = []
+            }
+        }
 
         let endpoints = updated.stops + [route.destination]
         guard let nextIndex = endpoints.indices.first(where: {

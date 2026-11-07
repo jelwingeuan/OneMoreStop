@@ -485,7 +485,9 @@ private struct ExploreView: View {
             let remaining = state.profileRemainingTime(at: context.date)
             Button { presentProfile() } label: {
                 ProfileAvatarView(profile: profiles.first, state: avatarState,
-                                  remaining: remaining, original: state.profileOriginalAllowance,
+                                  remaining: remaining,
+                                  original: state.activeJourney && !state.isTravelerOnRoute
+                                      ? 0 : state.profileOriginalAllowance,
                                   badgeSymbol: profileBadge(for: avatarState))
             }
             .buttonStyle(ProfilePressStyle(reduceMotion: reduceMotion))
@@ -532,6 +534,9 @@ private struct ExploreView: View {
         case .journeyCompleted: activity = "Journey completed."
         case .planning: activity = "Planning journey."
         case .idle: activity = ""
+        }
+        if state.activeJourney && !state.isTravelerOnRoute {
+            return "Profile, \(name). Journey active. Arrival and time margin need a location refresh."
         }
         let budgetLabel = state.timeBudget.deadline == nil ? "Adventure Time" :
             (state.activeJourney ? "approximate arrival margin" : "arrival margin")
@@ -939,17 +944,23 @@ private struct JourneySheetView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(state.timeBudget.deadline == nil ? "Extra driving left" : "Arrival margin")
                             .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                        Text(TripFormatting.duration(state.remainingTime)).font(.title.bold())
+                        if state.activeJourney && !state.isTravelerOnRoute {
+                            Text("Refresh location").font(.subheadline.bold())
+                        } else {
+                            Text(TripFormatting.duration(state.remainingTime)).font(.title.bold())
+                        }
                     }
                     Spacer()
                     VStack(alignment: .trailing, spacing: 2) {
-                        Text("Driving arrival").font(.caption).foregroundStyle(.secondary)
+                        Text(state.activeJourney ? "Approx. driving arrival" : "Driving arrival")
+                            .font(.caption).foregroundStyle(.secondary)
                         if let arrival = state.drivingArrival { Text(TripFormatting.arrival(arrival)).font(.subheadline.bold()) }
+                        else if state.activeJourney { Text("Unavailable").font(.subheadline.bold()) }
                     }
                 }
                 .padding(14)
                 .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: DesignValues.cardRadius))
-                if state.plannedVisitSeconds > 0, let arrival = state.plannedArrival {
+                if state.plannedVisitSecondsRemaining > 0, let arrival = state.plannedArrival {
                     Text("With planned visits: \(TripFormatting.arrival(arrival))")
                         .font(.caption).foregroundStyle(.secondary)
                 }
@@ -961,8 +972,6 @@ private struct JourneySheetView: View {
     private func journeyMetrics(_ journey: Journey) -> some View {
         Label(TripFormatting.duration(journey.drivingDuration), systemImage: "car.fill")
         Label(TripFormatting.extraTime(journey.extraDuration), systemImage: "plus.circle")
-        Label(TripFormatting.arrival(JourneyMath.arrival(after: journey.legs, startingAt: .now)),
-              systemImage: "clock")
     }
 
     private func routeOptions(_ route: RoutePlan) -> some View {

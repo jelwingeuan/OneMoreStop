@@ -35,8 +35,13 @@ struct ActiveJourneyView: View {
                             }
                             Text("\(TripFormatting.duration(journey.drivingDuration)) total routed driving")
                                 .font(.subheadline).foregroundStyle(.secondary)
-                            Text("\(state.timeBudget.deadline == nil ? "Adventure Time" : "Approx. arrival margin"): \(TripFormatting.duration(state.remainingTime))")
-                                .font(.headline).foregroundStyle(.orange)
+                            if state.isTravelerOnRoute {
+                                Text("\(state.timeBudget.deadline == nil ? "Adventure Time" : "Approx. arrival margin"): \(TripFormatting.duration(state.remainingTime))")
+                                    .font(.headline).foregroundStyle(.orange)
+                            } else {
+                                Text("Arrival and time margin need a location refresh")
+                                    .font(.headline).foregroundStyle(.orange)
+                            }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(20)
